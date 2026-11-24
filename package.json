@@ -1,0 +1,74 @@
+{
+  "name": "@gruu6y/page-simple-share",
+  "version": "0.1.2",
+  "description": "简单分享：去中心化、零信任、开箱即用的跨网 Magpie 模型分享插件（支持 P2P / 自建盲中转 / 公网直连）",
+  "license": "MIT",
+  "author": "Gruu6y",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "type": "module",
+  "main": "./index.mjs",
+  "bin": {
+    "magpie-simple-share": "bin/simple-share.mjs",
+    "simple-share": "bin/simple-share.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "lib",
+    "bin",
+    "page",
+    "ui",
+    "relay",
+    "assets/icon.svg",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-page",
+    "magpie-plugin",
+    "simple-share",
+    "p2p",
+    "mtls",
+    "iroh"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gruu6y/magpie-simple-share.git"
+  },
+  "homepage": "https://github.com/Gruu6y/magpie-simple-share#readme",
+  "bugs": {
+    "url": "https://github.com/Gruu6y/magpie-simple-share/issues"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "magpie": {
+    "icon": "https://raw.githubusercontent.com/Gruu6y/magpie-simple-share/main/assets/icon.svg",
+    "page": {
+      "title": "Simple Share",
+      "titles": {
+        "zh": "简单分享",
+        "zh-TW": "簡單分享"
+      },
+      "file": "page/index.html",
+      "icon": "page/icon.svg",
+      "service": {
+        "port": 3494,
+        "option": "port"
+      }
+    },
+    "permissions": [
+      "providers:list"
+    ],
+    "options": {
+      "port": 3494
+    }
+  },
+  "scripts": {
+    "test": "bun test"
+  }
+}
