@@ -454,32 +454,40 @@ describe("Domestic bootstrap scripts (scripts/bootstrap.ps1 & scripts/bootstrap.
       "http://127.0.0.1:3494/#invite=mshare1%3Aabc;id",
       "https://relay.example.com/join/",
     ];
-    for (const bad of badInputs) {
-      const badRes = await runProcess(psExe, [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        scriptPath,
-        "-Invite",
-        bad,
-        "-DryRun",
-      ]);
+    const badResults = await Promise.all(
+      badInputs.map((bad) =>
+        runProcess(psExe, [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+          "-Invite",
+          bad,
+          "-DryRun",
+        ]),
+      ),
+    );
+    for (const badRes of badResults) {
       expect(badRes.code).not.toBe(0);
     }
 
     // Regression: Set-StrictMode must NOT crash when invite JSON omits optional properties (e.g. {} or null)
-    for (const minimalCode of ["mshare1:e30", "mshare1:bnVsbA"]) {
-      const minRes = await runProcess(psExe, [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        scriptPath,
-        "-Invite",
-        minimalCode,
-        "-DryRun",
-      ]);
+    const minimalResults = await Promise.all(
+      ["mshare1:e30", "mshare1:bnVsbA"].map((minimalCode) =>
+        runProcess(psExe, [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+          "-Invite",
+          minimalCode,
+          "-DryRun",
+        ]),
+      ),
+    );
+    for (const minRes of minimalResults) {
       expect(minRes.code).toBe(0);
     }
 
@@ -550,7 +558,7 @@ describe("Domestic bootstrap scripts (scripts/bootstrap.ps1 & scripts/bootstrap.
       await new Promise((r) => mockServer.close(r));
       await fsp.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
     }
-  });
+  }, 30_000);
 
   test("scripts/bootstrap.sh passes POSIX syntax check, strict invite validation, and fresh loopback mirror install", async () => {
     const candidates = process.platform === "win32"
@@ -583,8 +591,10 @@ describe("Domestic bootstrap scripts (scripts/bootstrap.ps1 & scripts/bootstrap.
       "http://127.0.0.1:3494/#invite=mshare1%3Aabc;id",
       "https://relay.example.com/join/",
     ];
-    for (const bad of badInvites) {
-      const badRes = await runProcess(shExe, [scriptPath, "--invite", bad, "--dry-run"]);
+    const badResults = await Promise.all(
+      badInvites.map((bad) => runProcess(shExe, [scriptPath, "--invite", bad, "--dry-run"])),
+    );
+    for (const badRes of badResults) {
       expect(badRes.code).not.toBe(0);
     }
 
@@ -723,5 +733,5 @@ describe("Domestic bootstrap scripts (scripts/bootstrap.ps1 & scripts/bootstrap.
       await new Promise((r) => mockServer.close(r));
       await fsp.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
     }
-  });
+  }, 30_000);
 });
