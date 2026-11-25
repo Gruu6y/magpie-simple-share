@@ -71,8 +71,13 @@ const uiState = {
   expandedMemberId: null,
   viewedMode: null,
   dirtyInputs: new Set(),
-  activeInvite: null, // { id, code, mode, expiresAt, ttlSec }
+  activeInvite: null, // { id, code, mode, expiresAt, ttlSec, shareUrl, cardFilename }
+  inviteTtlSec: 300,
   inviteQrOpen: false,
+  lastExportedCardHtml: "",
+  lastExportedCardFilename: "",
+  exportingInviteCard: false,
+  handlingInviteHash: false,
   parsedInvite: null, // { code, h, fp, m, id, ep, expiresAt }
   currentApproveId: null,
   currentEditMemberId: null,
@@ -951,7 +956,7 @@ function renderAll() {
     $("#received-list").innerHTML = `
       <div class="empty">
         <strong>还没有收到他人分享的模型</strong>
-        点击右上角「输入分享邀请…」，粘贴对方发来的 <code class="mono">mshare1:</code> 邀请码即可申请。
+        点击右上角「输入分享邀请…」，粘贴对方发来的 <code class="mono">mshare1:</code> 邀请码或完整分享链接即可申请。
       </div>
     `;
   } else {
@@ -1111,6 +1116,7 @@ function renderAll() {
   syncInputIfNotDirty("input-relay-token", net.relayToken || "");
   syncInputIfNotDirty("input-direct-host", net.directHost || "");
   syncInputIfNotDirty("input-direct-port", String(net.directPort || 3497));
+  syncInputIfNotDirty("input-share-base-url", net.shareBaseUrl || "");
 
   $("#docker-cmd").textContent = buildDockerCommand(
     $("#input-relay-addr").value || net.relayAddr,
@@ -1215,6 +1221,20 @@ async function saveHostName() {
   }
 }
 
+function getSelectedInviteTtlSec() {
+  const raw = Number($("#invite-ttl-select")?.value);
+  if (Number.isInteger(raw) && raw >= 60 && raw <= 86400) return raw;
+  return 300;
+}
+
+function formatInviteCountdown(seconds) {
+  const left = Math.max(0, Math.floor(seconds));
+  const hh = Math.floor(left / 3600);
+  const mm = String(Math.floor((left % 3600) / 60)).padStart(2, "0");
+  const ss = String(left % 60).padStart(2, "0");
+  return hh > 0 ? `${String(hh).padStart(2, "0")}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 function updateInviteCountdown() {
   const inv = uiState.activeInvite;
   if (!inv) return;
@@ -1222,23 +1242,56 @@ function updateInviteCountdown() {
     ? inv.expiresAt
     : (Date.parse(inv.expiresAt) || (Date.now() + (Number(inv.ttlSec) || 300) * 1000));
   const left = Math.max(0, Math.floor((expMs - Date.now()) / 1000));
-  const mm = String(Math.floor(left / 60)).padStart(2, "0");
-  const ss = String(left % 60).padStart(2, "0");
-  $("#invite-countdown").textContent = left > 0 ? `${mm}:${ss} 后过期` : "已过期（请重新生成）";
+  $("#invite-countdown").textContent = left > 0 ? `${formatInviteCountdown(left)} 后过期` : "已过期（请重新生成）";
+  const exportBtn = $("#btn-export-invite-card");
+  if (exportBtn && !uiState.exportingInviteCard) {
+    exportBtn.disabled = left === 0;
+  }
 }
 
 function showInviteInDialog(invite) {
   uiState.activeInvite = invite;
+  uiState.lastExportedCardHtml = "";
+  uiState.lastExportedCardFilename = "";
   $("#invite-code-input").value = invite.code || "";
   $("#invite-mode-tag").textContent = MODE_META[invite.mode]?.short || invite.mode || "";
   $("#btn-copy-invite").textContent = "复制邀请码";
+  $("#btn-copy-invite-link").textContent = "复制链接";
+  $("#invite-card-fallback").hidden = true;
+
+  const ttlSelect = $("#invite-ttl-select");
+  const effectiveTtl = Number(invite.ttlSec) || uiState.inviteTtlSec || 300;
+  if (ttlSelect && [...ttlSelect.options].some((o) => Number(o.value) === effectiveTtl)) {
+    ttlSelect.value = String(effectiveTtl);
+    uiState.inviteTtlSec = effectiveTtl;
+  }
+  const presetBtn = $("#btn-ttl-preset-1800");
+  if (presetBtn) {
+    presetBtn.hidden = Number(ttlSelect?.value || effectiveTtl) === 1800;
+  }
+
+  const shareUrl = typeof invite.shareUrl === "string" ? invite.shareUrl.trim() : "";
+  const linkRow = $("#invite-link-row");
+  const linkInput = $("#invite-link-input");
+  const emptyTip = $("#invite-link-empty-tip");
+  if (shareUrl) {
+    linkInput.value = shareUrl;
+    linkRow.hidden = false;
+    emptyTip.hidden = true;
+  } else {
+    linkInput.value = "";
+    linkRow.hidden = true;
+    emptyTip.hidden = false;
+  }
+
   renderQrSvg($("#invite-qr-svg"), invite.code || "");
   if (inviteTimer) clearInterval(inviteTimer);
   updateInviteCountdown();
   inviteTimer = setInterval(updateInviteCountdown, 1000);
 }
 
-async function createAndShowInvite({ replaceOld = false } = {}) {
+async function createAndShowInvite({ replaceOld = false, ttlSec } = {}) {
+  const requestedTtl = Number.isInteger(ttlSec) ? ttlSec : getSelectedInviteTtlSec();
   const oldId = uiState.activeInvite?.id;
   if (replaceOld && oldId) {
     try {
@@ -1248,20 +1301,121 @@ async function createAndShowInvite({ replaceOld = false } = {}) {
       });
     } catch { /* ignore if already expired/consumed */ }
   }
-  const inv = await api("/api/host/invites", { method: "POST", isMutation: true });
+  const inv = await api("/api/host/invites", {
+    method: "POST",
+    body: { ttlSec: requestedTtl },
+    isMutation: true,
+  });
+  uiState.inviteTtlSec = Number(inv.ttlSec) || requestedTtl;
   showInviteInDialog(inv);
   return inv;
+}
+
+async function changeInviteTtl(nextTtl) {
+  const ttlSelect = $("#invite-ttl-select");
+  const presetBtn = $("#btn-ttl-preset-1800");
+  const regenBtn = $("#btn-regen-invite");
+  const prevTtl = uiState.inviteTtlSec || 300;
+  const targetTtl = Number.isInteger(nextTtl) && nextTtl >= 60 && nextTtl <= 86400 ? nextTtl : 300;
+
+  if (ttlSelect) {
+    ttlSelect.value = String(targetTtl);
+    ttlSelect.disabled = true;
+  }
+  if (presetBtn) presetBtn.disabled = true;
+  if (regenBtn) regenBtn.disabled = true;
+  try {
+    await createAndShowInvite({ replaceOld: true, ttlSec: targetTtl });
+    const label = targetTtl === 7200 ? "2 小时" : `${Math.round(targetTtl / 60)} 分钟`;
+    toast(`已更新有效期为 ${label} 并重新生成邀请，旧邀请已作废`);
+  } catch (err) {
+    if (ttlSelect) ttlSelect.value = String(prevTtl);
+    if (presetBtn) presetBtn.hidden = prevTtl === 1800;
+    toast(`更新有效期失败：${err.message}`);
+  } finally {
+    if (ttlSelect) ttlSelect.disabled = false;
+    if (presetBtn) presetBtn.disabled = false;
+    if (regenBtn) regenBtn.disabled = false;
+  }
+}
+
+function triggerBlobHtmlDownload(filename, html) {
+  const safeName = String(filename || "magpie-simple-share-invite.html").trim() || "magpie-simple-share-invite.html";
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safeName;
+    a.rel = "noopener";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  }
+}
+
+async function exportInviteCard() {
+  const inv = uiState.activeInvite;
+  if (!inv?.id || uiState.exportingInviteCard) return;
+  const btn = $("#btn-export-invite-card");
+  const fallbackBox = $("#invite-card-fallback");
+  const fallbackText = $("#invite-card-fallback-text");
+  uiState.exportingInviteCard = true;
+  btn.disabled = true;
+  btn.textContent = "正在生成邀请卡…";
+  fallbackBox.hidden = true;
+  try {
+    const res = await api(`/api/host/invites/${encodeURIComponent(inv.id)}/card`);
+    const html = typeof res?.html === "string" ? res.html : "";
+    const filename = (typeof res?.filename === "string" && res.filename.trim())
+      ? res.filename.trim()
+      : (inv.cardFilename || "magpie-simple-share-invite.html");
+    if (!html) {
+      throw new Error("服务端未返回离线邀请卡内容。");
+    }
+    uiState.lastExportedCardHtml = html;
+    uiState.lastExportedCardFilename = filename;
+
+    // Sandboxed iframes without allow-downloads (opaque null origin) block <a download>.
+    if (window.origin === "null") {
+      fallbackText.textContent = `当前嵌入式沙箱限制直接下载文件，可点击右侧复制 HTML 保存为 ${filename}，或运行 simple-share invite --card 导出。`;
+      fallbackBox.hidden = false;
+      toast("嵌入式沙箱受限，已生成离线邀请卡 HTML 供复制保存");
+      return;
+    }
+
+    try {
+      triggerBlobHtmlDownload(filename, html);
+      toast(`已导出离线邀请卡：${filename}`);
+    } catch {
+      fallbackText.textContent = `浏览器拦截了文件下载，请点击右侧复制离线邀请卡 HTML 并保存为 ${filename}。`;
+      fallbackBox.hidden = false;
+      toast("文件下载受限，请点击「复制邀请卡 HTML」手动保存");
+    }
+  } catch (err) {
+    toast(`导出离线邀请卡失败：${err.message}`);
+  } finally {
+    uiState.exportingInviteCard = false;
+    btn.textContent = "导出离线邀请卡（.html）";
+    updateInviteCountdown();
+  }
 }
 
 async function openInviteDialog() {
   const btn = $("#btn-create-invite");
   btn.disabled = true;
   try {
-    await createAndShowInvite({ replaceOld: false });
+    const ttlSelect = $("#invite-ttl-select");
+    if (ttlSelect) ttlSelect.value = "300";
+    uiState.inviteTtlSec = 300;
+    await createAndShowInvite({ replaceOld: false, ttlSec: 300 });
     uiState.inviteQrOpen = false;
     $("#invite-qr-box").hidden = true;
     $("#btn-toggle-qr").textContent = "展开二维码";
-    $("#dlg-invite").showModal();
+    if (!$("#dlg-invite").open) $("#dlg-invite").showModal();
   } catch (err) {
     toast(`生成邀请失败：${err.message}`);
   } finally {
@@ -1283,6 +1437,8 @@ async function revokeCurrentInvite() {
       isMutation: true,
     });
     uiState.activeInvite = null;
+    uiState.lastExportedCardHtml = "";
+    uiState.lastExportedCardFilename = "";
     if (inviteTimer) clearInterval(inviteTimer);
     $("#dlg-invite").close();
     toast("已作废该一次性邀请码");
@@ -1440,6 +1596,83 @@ async function saveMemberEdit() {
 
 // ==================== Receiver Flows ====================
 
+function extractInviteCodeFromHash(rawHash) {
+  const raw = String(rawHash || "").trim();
+  if (!raw || raw === "#") return "";
+  const body = raw.startsWith("#") ? raw.slice(1) : raw;
+  if (!body) return "";
+
+  let candidate = "";
+  if (/^invite=/i.test(body)) {
+    candidate = body.slice("invite=".length).split("&")[0];
+  } else if (/^mshare1(?::|%3a)/i.test(body)) {
+    candidate = body.split("&")[0];
+  } else {
+    return "";
+  }
+
+  let decoded = "";
+  try {
+    decoded = decodeURIComponent(candidate).trim();
+  } catch {
+    return "";
+  }
+  if (!decoded.startsWith("mshare1:")) return "";
+  if (!/^mshare1:[A-Za-z0-9_-]+$/.test(decoded)) return "";
+  return decoded;
+}
+
+function extractInviteCodeFromInput(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) return "";
+  if (/^mshare1:[A-Za-z0-9_-]+$/.test(raw)) return raw;
+  try {
+    const parsedUrl = new URL(raw);
+    if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
+      const fromHash = extractInviteCodeFromHash(parsedUrl.hash);
+      if (fromHash) return fromHash;
+    }
+  } catch { /* not a full URL */ }
+  return raw;
+}
+
+function clearLocationHash() {
+  try {
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+  } catch {
+    try {
+      if (window.location.hash) window.location.hash = "";
+    } catch { /* ignore in strict opaque sandbox */ }
+  }
+}
+
+async function handleInviteHashHandoff() {
+  if (uiState.handlingInviteHash) return false;
+  const code = extractInviteCodeFromHash(window.location.hash);
+  if (!code) return false;
+
+  uiState.handlingInviteHash = true;
+  try {
+    // Immediately clear hash so invite secret does not remain in browser history.
+    clearLocationHash();
+
+    $$("dialog[open]").forEach((dlg) => {
+      if (dlg.id !== "dlg-paste") dlg.close();
+    });
+
+    switchTab("received");
+    openPasteDialog();
+    $("#paste-code-textarea").value = code;
+
+    // Land directly on Step 2 (host fingerprint + 4 transparency facts + device name).
+    // SECURITY INVARIANT: NEVER auto-submit /api/receiver/apply without explicit user confirmation!
+    await parseInviteCode();
+    return true;
+  } finally {
+    uiState.handlingInviteHash = false;
+  }
+}
+
 function openPasteDialog() {
   uiState.parsedInvite = null;
   $("#paste-dlg-title").textContent = "输入分享邀请";
@@ -1452,7 +1685,7 @@ function openPasteDialog() {
   $("#apply-error").hidden = true;
   $("#paste-code-textarea").value = "";
   $("#input-device-name").value = serverState?.identity?.hostName || "";
-  $("#dlg-paste").showModal();
+  if (!$("#dlg-paste").open) $("#dlg-paste").showModal();
 }
 
 function backToPasteStep1() {
@@ -1466,13 +1699,14 @@ function backToPasteStep1() {
 }
 
 async function parseInviteCode() {
-  const code = $("#paste-code-textarea").value.trim();
+  const rawInput = $("#paste-code-textarea").value.trim();
   const errEl = $("#paste-error");
-  if (!code) {
-    errEl.textContent = "请先粘贴对方发给你的分享邀请码。";
+  if (!rawInput) {
+    errEl.textContent = "请先粘贴对方发给你的分享邀请码或完整分享链接。";
     errEl.hidden = false;
     return;
   }
+  const code = extractInviteCodeFromInput(rawInput);
   const btn = $("#btn-parse-invite");
   btn.disabled = true;
   errEl.hidden = true;
@@ -1600,7 +1834,9 @@ async function saveNetworkMode(targetMode, networkPayload, feedbackEl) {
       isMutation: true,
     });
     uiState.viewedMode = targetMode;
-    uiState.dirtyInputs.clear();
+    for (const id of ["input-custom-iroh-relay", "input-relay-addr", "input-relay-token", "input-direct-host", "input-direct-port"]) {
+      uiState.dirtyInputs.delete(id);
+    }
     await refreshState();
     const label = MODE_META[targetMode]?.full || targetMode;
     if (feedbackEl) {
@@ -1613,6 +1849,40 @@ async function saveNetworkMode(targetMode, networkPayload, feedbackEl) {
     } else {
       toast(`切换模式失败：${err.message}`);
     }
+  }
+}
+
+async function saveShareBaseUrl(rawValue) {
+  const shareBaseUrl = String(rawValue ?? "").trim();
+  const saveBtn = $("#btn-save-share-base-url");
+  const clearBtn = $("#btn-clear-share-base-url");
+  const feedbackEl = $("#share-base-url-result");
+  saveBtn.disabled = true;
+  clearBtn.disabled = true;
+  try {
+    const res = await api("/api/host/share-base-url", {
+      method: "POST",
+      body: { shareBaseUrl },
+      isMutation: true,
+    });
+    const saved = typeof res?.shareBaseUrl === "string" ? res.shareBaseUrl : shareBaseUrl;
+    uiState.dirtyInputs.delete("input-share-base-url");
+    $("#input-share-base-url").value = saved;
+    await refreshState();
+    if (feedbackEl) {
+      feedbackEl.innerHTML = saved
+        ? `<span style="color:var(--green);">✓ 已保存在线邀请页地址</span>`
+        : `<span style="color:var(--green);">✓ 已清空在线邀请页地址</span>`;
+    }
+    toast(saved ? "已保存在线邀请页地址" : "已清空在线邀请页地址");
+  } catch (err) {
+    if (feedbackEl) {
+      feedbackEl.innerHTML = `<span style="color:var(--red);">✕ ${escHtml(err.message)}</span>`;
+    }
+    toast(`保存失败：${err.message}`);
+  } finally {
+    saveBtn.disabled = false;
+    clearBtn.disabled = false;
   }
 }
 
@@ -1764,9 +2034,45 @@ function bindEvents() {
   });
 
   $("#btn-create-invite").addEventListener("click", openInviteDialog);
+  $("#invite-ttl-select").addEventListener("change", (e) => {
+    void changeInviteTtl(Number(e.target.value));
+  });
+  $("#btn-ttl-preset-1800").addEventListener("click", () => {
+    void changeInviteTtl(1800);
+  });
+  $("#btn-export-invite-card").addEventListener("click", () => {
+    void exportInviteCard();
+  });
+  $("#btn-copy-invite-card-html").addEventListener("click", async () => {
+    const ok = await copyText(uiState.lastExportedCardHtml);
+    if (ok) {
+      toast(`已复制离线邀请卡 HTML，可保存为 ${uiState.lastExportedCardFilename || "invite.html"}`);
+    } else {
+      toast("复制受限，请尝试在独立浏览器中打开导出或使用 CLI");
+    }
+  });
+  $("#btn-copy-invite-link").addEventListener("click", async () => {
+    const ok = await copyText($("#invite-link-input").value);
+    if (ok) {
+      $("#btn-copy-invite-link").textContent = "已复制 ✓";
+      setTimeout(() => { $("#btn-copy-invite-link").textContent = "复制链接"; }, 1600);
+      toast("在线邀请链接已复制到剪贴板");
+    } else {
+      toast("自动复制受限，请手动全选复制输入框中的在线链接");
+    }
+  });
+  $("#btn-jump-share-base-url").addEventListener("click", () => {
+    $("#dlg-invite").close();
+    switchTab("network");
+    const input = $("#input-share-base-url");
+    if (input) {
+      input.scrollIntoView({ behavior: "smooth", block: "center" });
+      input.focus();
+    }
+  });
   $("#btn-regen-invite").addEventListener("click", async () => {
     try {
-      await createAndShowInvite({ replaceOld: true });
+      await createAndShowInvite({ replaceOld: true, ttlSec: getSelectedInviteTtlSec() });
       toast("已重新生成一次性邀请码，旧码已作废");
     } catch (err) {
       toast(`重新生成失败：${err.message}`);
@@ -1834,7 +2140,7 @@ function bindEvents() {
     });
   });
 
-  for (const id of ["input-custom-iroh-relay", "input-relay-addr", "input-relay-token", "input-direct-host", "input-direct-port"]) {
+  for (const id of ["input-custom-iroh-relay", "input-relay-addr", "input-relay-token", "input-direct-host", "input-direct-port", "input-share-base-url"]) {
     $(`#${id}`)?.addEventListener("input", () => {
       uiState.dirtyInputs.add(id);
       if (id === "input-relay-addr" || id === "input-relay-token") {
@@ -1845,6 +2151,18 @@ function bindEvents() {
       }
     });
   }
+
+  $("#btn-save-share-base-url").addEventListener("click", () => {
+    void saveShareBaseUrl($("#input-share-base-url").value);
+  });
+  $("#btn-clear-share-base-url").addEventListener("click", () => {
+    $("#input-share-base-url").value = "";
+    void saveShareBaseUrl("");
+  });
+
+  window.addEventListener("hashchange", () => {
+    void handleInviteHashHandoff();
+  });
 
   $("#btn-install-iroh").addEventListener("click", installIrohComponent);
   $("#btn-save-p2p-relay").addEventListener("click", () => {
@@ -2001,4 +2319,5 @@ function bindEvents() {
 bindEvents();
 refreshState().finally(() => {
   scheduleNextPoll();
+  void handleInviteHashHandoff();
 });
