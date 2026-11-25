@@ -2,10 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { startServer } from "../lib/server.mjs";
 import { startBlindRelay } from "../relay/simple-share-relay.mjs";
 import { canLaunchTestBrowser, launchTestBrowser, stageLocalIrohDir } from "./helpers/platform.mjs";
+
+const UI_DIR = path.resolve(fileURLToPath(new URL("../ui", import.meta.url)));
 
 const HAS_BROWSER = await canLaunchTestBrowser();
 const browserTest = HAS_BROWSER || process.env.REQUIRE_BROWSER_TESTS === "1" ? test : test.skip;
@@ -466,6 +469,464 @@ describe("Headless Chrome UI & sandbox iframe E2E", () => {
 
       // Assert 0 pageerror, 0 console.error, 0 requestfailed, 0 HTTP >= 400
       expect(allErrors).toEqual([]);
+    },
+    60_000,
+  );
+
+  browserTest(
+    "drives Host invite TTL selector, offline HTML card export (download + sandbox fallback), online shareUrl display, and custom shareBaseUrl persistence with 0 errors",
+    async () => {
+      const screenshotDir = resolveScreenshotDir();
+      const sessionToken = "test-ui-contract-token-1234";
+      let shareBaseUrl = "";
+      let inviteSeq = 0;
+      const createdInvites = [];
+      const revokedIds = [];
+      const cardRequests = [];
+      const shareBaseUrlUpdates = [];
+      const invitesById = new Map();
+
+      const mimeByExt = {
+        ".html": "text/html; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+      };
+
+      const stubServer = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(req) {
+          const url = new URL(req.url);
+          const p = url.pathname;
+          const origin = req.headers.get("origin");
+          const corsHeaders = {
+            "access-control-allow-origin": origin ?? "*",
+            vary: "Origin",
+          };
+
+          if (p.startsWith("/api/")) {
+            if (req.method === "OPTIONS") {
+              return new Response(null, {
+                status: 204,
+                headers: {
+                  ...corsHeaders,
+                  "access-control-allow-methods": "GET, POST, PATCH, DELETE",
+                  "access-control-allow-headers": "x-simple-share-token, content-type",
+                },
+              });
+            }
+            if (req.headers.get("x-simple-share-token") !== sessionToken) {
+              return Response.json(
+                { error: "unauthorized", message: "Invalid token" },
+                { status: 401, headers: corsHeaders },
+              );
+            }
+
+            if (p === "/api/state" && req.method === "GET") {
+              return Response.json(
+                {
+                  mode: "p2p",
+                  sharingEnabled: true,
+                  tosAcknowledged: true,
+                  identity: {
+                    hostName: "家里台式机",
+                    fingerprint: "ed25519:a1b2·c3d4·e5f6·0718",
+                    irohEndpointId: "a".repeat(64),
+                  },
+                  network: {
+                    irohRelayUrl: "",
+                    relayAddr: "",
+                    relayToken: "",
+                    directHost: "",
+                    directPort: 3497,
+                    shareBaseUrl,
+                  },
+                  irohStatus: { installed: true, integrityOk: true, supported: true, version: "1.2.0" },
+                  magpieGateway: { ok: true, running: true, addr: "127.0.0.1:3425", version: "0.1.4572" },
+                  transportStatus: { mode: "p2p", active: true, error: "" },
+                  members: [],
+                  pending: [],
+                  received: [],
+                  receivedPending: [],
+                  availableModels: [],
+                  usageByMember: {},
+                  visibility: { limit: true, quotas: false },
+                },
+                { headers: corsHeaders },
+              );
+            }
+
+            if (p === "/api/host/invites" && req.method === "POST") {
+              let body = {};
+              try {
+                body = await req.json();
+              } catch {}
+              const ttlSec = Number.isInteger(body?.ttlSec) ? body.ttlSec : 300;
+              inviteSeq += 1;
+              const id = `inv-ui-${inviteSeq}`;
+              const code = `mshare1:eyJ2IjoxLCJpZCI6IiR7aWR9In0_${inviteSeq}`;
+              const expiresAt = Date.now() + ttlSec * 1000;
+              const shareUrl = shareBaseUrl ? `${shareBaseUrl.replace(/\/+$/, "")}/#${code}` : "";
+              const cardFilename = `simple-share-invite-${inviteSeq}.html`;
+              const inv = { id, code, mode: "p2p", ttlSec, expiresAt, shareUrl, cardFilename };
+              createdInvites.push({ id, ttlSec, shareUrl });
+              invitesById.set(id, inv);
+              return Response.json(inv, { headers: corsHeaders });
+            }
+
+            const cardMatch = /^\/api\/host\/invites\/([^/]+)\/card$/.exec(p);
+            if (cardMatch && req.method === "GET") {
+              const id = decodeURIComponent(cardMatch[1]);
+              const inv = invitesById.get(id);
+              if (!inv) {
+                return Response.json({ error: "not_found", message: "Invite not found" }, { status: 404, headers: corsHeaders });
+              }
+              cardRequests.push(id);
+              const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>简单分享离线邀请卡</title></head><body><h1>来自家里台式机的邀请</h1><pre>${inv.code}</pre></body></html>`;
+              return Response.json(
+                { ok: true, id, filename: inv.cardFilename, html },
+                { headers: corsHeaders },
+              );
+            }
+
+            const delMatch = /^\/api\/host\/invites\/([^/]+)$/.exec(p);
+            if (delMatch && req.method === "DELETE") {
+              const id = decodeURIComponent(delMatch[1]);
+              revokedIds.push(id);
+              invitesById.delete(id);
+              return Response.json({ ok: true, id }, { headers: corsHeaders });
+            }
+
+            if (p === "/api/host/share-base-url" && req.method === "POST") {
+              const body = await req.json();
+              const raw = String(body?.shareBaseUrl ?? "").trim();
+              if (raw && !/^https?:\/\/[^\s?#]+$/i.test(raw)) {
+                return Response.json(
+                  { error: "invalid_share_base_url", message: "请输入合法的 http:// 或 https:// 地址" },
+                  { status: 400, headers: corsHeaders },
+                );
+              }
+              shareBaseUrl = raw.replace(/\/+$/, "");
+              shareBaseUrlUpdates.push(shareBaseUrl);
+              return Response.json({ ok: true, shareBaseUrl }, { headers: corsHeaders });
+            }
+
+            return Response.json({ error: "not_found", message: "Not found" }, { status: 404, headers: corsHeaders });
+          }
+
+          if (p === "/" || p === "/index.html") {
+            const html = fs
+              .readFileSync(path.join(UI_DIR, "index.html"), "utf8")
+              .replaceAll("__SIMPLE_SHARE_TOKEN__", sessionToken);
+            return new Response(html, {
+              headers: {
+                "content-type": mimeByExt[".html"],
+                "cache-control": "no-store",
+                "content-security-policy":
+                  "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+                  "connect-src 'self' http: https:; font-src 'self'; object-src 'none'; base-uri 'none'; " +
+                  "form-action 'none'",
+              },
+            });
+          }
+
+          const rel = p.replace(/^\/+/, "");
+          const full = path.join(UI_DIR, rel);
+          if (rel && !rel.includes("..") && fs.existsSync(full)) {
+            const ext = path.extname(full).toLowerCase();
+            return new Response(fs.readFileSync(full), {
+              headers: {
+                ...corsHeaders,
+                "content-type": mimeByExt[ext] || "application/octet-stream",
+                "cache-control": "no-store",
+              },
+            });
+          }
+          return new Response("Not Found", { status: 404 });
+        },
+      });
+      cleanups.push(() => stubServer.stop(true));
+
+      const sandboxWrapper = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch() {
+          const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="icon" href="data:,"></head><body style="margin:0;"><iframe id="stub-frame" sandbox="allow-scripts" src="http://127.0.0.1:${stubServer.port}/?theme=light" style="width:100vw;height:100vh;border:0;"></iframe></body></html>`;
+          return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+        },
+      });
+      cleanups.push(() => sandboxWrapper.stop(true));
+
+      const browser = await launchTestBrowser();
+      cleanups.push(() => browser.close());
+
+      const hostCtx = await browser.newContext({ viewport: { width: 1280, height: 860 }, acceptDownloads: true });
+      const sandboxCtx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+      cleanups.push(() => hostCtx.close());
+      cleanups.push(() => sandboxCtx.close());
+
+      const page = await hostCtx.newPage();
+      const sandboxPage = await sandboxCtx.newPage();
+      const errors = [];
+      const assets = new Map();
+      attachPageMonitors(page, "invite-host", errors, assets);
+      attachPageMonitors(sandboxPage, "invite-sandbox", errors, assets);
+
+      await page.goto(`http://127.0.0.1:${stubServer.port}/`, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => !document.querySelector("#btn-create-invite")?.disabled);
+
+      // 1. Open invite dialog -> default TTL 300s (5 min), empty shareUrl tip shown
+      await page.click("#btn-create-invite");
+      await page.waitForSelector("#dlg-invite[open]");
+      expect(createdInvites.length).toBe(1);
+      expect(createdInvites[0].ttlSec).toBe(300);
+      expect(await page.inputValue("#invite-ttl-select")).toBe("300");
+      expect(await page.isVisible("#btn-ttl-preset-1800")).toBe(true);
+      expect(await page.isHidden("#invite-link-row")).toBe(true);
+      expect(await page.isVisible("#invite-link-empty-tip")).toBe(true);
+      expect(await page.textContent("#invite-countdown")).toMatch(/^0[45]:\d{2} 后过期$/);
+
+      // 2. Click one-click 30-min preset -> revokes old invite, creates 1800s invite
+      await page.click("#btn-ttl-preset-1800");
+      await page.waitForFunction(
+        () =>
+          document.querySelector("#invite-ttl-select")?.value === "1800" &&
+          !document.querySelector("#invite-ttl-select")?.disabled &&
+          document.querySelector("#btn-ttl-preset-1800")?.hidden === true,
+      );
+      expect(revokedIds).toContain("inv-ui-1");
+      expect(createdInvites[1].ttlSec).toBe(1800);
+      expect(await page.isHidden("#btn-ttl-preset-1800")).toBe(true);
+      expect(await page.textContent("#invite-countdown")).toMatch(/^(29|30):\d{2} 后过期$/);
+
+      // 3. Switch TTL dropdown to 7200s (2 hours) -> revokes old invite, formats HH:MM:SS
+      await page.selectOption("#invite-ttl-select", "7200");
+      await page.waitForFunction(
+        () =>
+          !document.querySelector("#invite-ttl-select")?.disabled &&
+          (document.querySelector("#invite-countdown")?.textContent?.includes("01:59:") ||
+            document.querySelector("#invite-countdown")?.textContent?.includes("02:00:00")),
+      );
+      expect(revokedIds).toContain("inv-ui-2");
+      expect(createdInvites[2].ttlSec).toBe(7200);
+
+      // 4. Export offline HTML invite card -> triggers real Blob download with matching content
+      const [download] = await Promise.all([
+        page.waitForEvent("download"),
+        page.click("#btn-export-invite-card"),
+      ]);
+      expect(cardRequests).toEqual(["inv-ui-3"]);
+      expect(download.suggestedFilename()).toBe("simple-share-invite-3.html");
+      const downloadedPath = path.join(makeTempDir("ss-ui-dl-"), download.suggestedFilename());
+      await download.saveAs(downloadedPath);
+      const downloadedHtml = fs.readFileSync(downloadedPath, "utf8");
+      expect(downloadedHtml).toContain("简单分享离线邀请卡");
+      expect(downloadedHtml).toContain("mshare1:");
+
+      // 5. Jump from empty shareUrl tip to Network & Security -> Share Base URL input
+      await page.click("#btn-jump-share-base-url");
+      await page.waitForFunction(() => !document.querySelector("#dlg-invite")?.open);
+      expect(await page.isVisible("#panel-network")).toBe(true);
+      expect(await page.isVisible("#input-share-base-url")).toBe(true);
+
+      // Verify dirty input protection across poll cycle
+      await page.fill("#input-share-base-url", "https://share.example.cn/join");
+      await page.locator("#tab-network").focus();
+      await page.waitForTimeout(2700);
+      expect(await page.inputValue("#input-share-base-url")).toBe("https://share.example.cn/join");
+
+      // Save custom domestic Share Base URL
+      await page.click("#btn-save-share-base-url");
+      await page.waitForFunction(() =>
+        document.querySelector("#share-base-url-result")?.textContent?.includes("已保存在线邀请页地址"),
+      );
+      expect(shareBaseUrlUpdates).toEqual(["https://share.example.cn/join"]);
+      await page.screenshot({ path: path.join(screenshotDir, "ui-share-base-url.png"), fullPage: false });
+
+      // 6. Re-open invite dialog -> online shareUrl row visible with expected URL
+      await page.click("#tab-owned");
+      await page.click("#btn-create-invite");
+      await page.waitForSelector("#dlg-invite[open]");
+      expect(await page.isVisible("#invite-link-row")).toBe(true);
+      expect(await page.isHidden("#invite-link-empty-tip")).toBe(true);
+      const displayedShareUrl = await page.inputValue("#invite-link-input");
+      const displayedInviteCode = await page.inputValue("#invite-code-input");
+      expect(displayedShareUrl).toBe(`https://share.example.cn/join/#${displayedInviteCode}`);
+
+      // Capture light & dark theme screenshots of updated invite dialog
+      await page.screenshot({ path: path.join(screenshotDir, "ui-invite-dialog-light.png"), fullPage: false });
+      await page.evaluate(() => {
+        document.documentElement.dataset.theme = "dark";
+      });
+      await page.waitForTimeout(120);
+      await page.screenshot({ path: path.join(screenshotDir, "ui-invite-dialog-dark.png"), fullPage: false });
+      await page.evaluate(() => {
+        document.documentElement.dataset.theme = "light";
+      });
+      await page.click("#dlg-invite [data-close-dlg]");
+
+      // Clear Share Base URL
+      await page.click("#tab-network");
+      await page.click("#btn-clear-share-base-url");
+      await page.waitForFunction(() =>
+        document.querySelector("#share-base-url-result")?.textContent?.includes("已清空"),
+      );
+      expect(await page.inputValue("#input-share-base-url")).toBe("");
+      expect(shareBaseUrlUpdates).toEqual(["https://share.example.cn/join", ""]);
+
+      // 7. Inside <iframe sandbox="allow-scripts">, card export gracefully shows fallback notice without console errors
+      await sandboxPage.goto(`http://127.0.0.1:${sandboxWrapper.port}/`, { waitUntil: "domcontentloaded" });
+      const frame = await (await sandboxPage.waitForSelector("#stub-frame")).contentFrame();
+      expect(frame).not.toBeNull();
+      await frame.waitForFunction(() => !document.querySelector("#btn-create-invite")?.disabled);
+      await frame.click("#btn-create-invite");
+      await frame.waitForSelector("#dlg-invite[open]");
+      await frame.click("#btn-export-invite-card");
+      await frame.waitForSelector("#invite-card-fallback:not([hidden])");
+      expect(await frame.isVisible("#btn-copy-invite-card-html")).toBe(true);
+
+      expect(errors).toEqual([]);
+    },
+    60_000,
+  );
+
+  browserTest(
+    "handles receiver #invite= and #mshare1: hash auto-handoff to Step 2 confirmation, scrubs location.hash, and NEVER auto-submits /api/receiver/apply",
+    async () => {
+      const screenshotDir = resolveScreenshotDir();
+      const hostBaseDir = makeTempDir("ss-handoff-host-");
+      const recvBaseDir = makeTempDir("ss-handoff-recv-");
+
+      const hostIso = makeIsolatedEnv(hostBaseDir, "127.0.0.1:59991");
+      const recvIso = makeIsolatedEnv(recvBaseDir, "127.0.0.1:59992");
+
+      const relay = await startBlindRelay({ host: "127.0.0.1", port: 0, token: "handoff-tok" });
+      cleanups.push(() => relay.close());
+
+      const hostSrv = await startServer({
+        port: 0,
+        dataDir: hostIso.dataDir,
+        env: hostIso.env,
+        discoverGatewayFn: async () => ({ ok: true, running: true, url: "http://127.0.0.1:59991", addr: "127.0.0.1:59991", version: "0.1.4572" }),
+        fetchModelsFn: async () => [{ id: "deepseek/deepseek-chat", label: "DeepSeek Chat", provider: "deepseek", kind: "api" }],
+      });
+      cleanups.push(() => hostSrv.close());
+
+      const recvSrv = await startServer({
+        port: 0,
+        dataDir: recvIso.dataDir,
+        env: recvIso.env,
+        discoverGatewayFn: async () => ({ ok: false, running: false, url: "", addr: "", version: "" }),
+        fetchModelsFn: async () => [],
+      });
+      cleanups.push(() => recvSrv.close());
+
+      // Configure Host in Mode 2 self-relay and generate a real invite code
+      const hostHeaders = { "content-type": "application/json", "x-simple-share-token": hostSrv.token };
+      const modeRes = await fetch(`${hostSrv.url}/api/network/mode`, {
+        method: "POST",
+        headers: hostHeaders,
+        body: JSON.stringify({
+          mode: "self-relay",
+          network: { relayAddr: `127.0.0.1:${relay.port}`, relayToken: "handoff-tok" },
+        }),
+      });
+      expect(modeRes.ok).toBe(true);
+
+      const toggleRes = await fetch(`${hostSrv.url}/api/host/toggle`, {
+        method: "POST",
+        headers: hostHeaders,
+        body: JSON.stringify({ enabled: true, tosAcknowledged: true }),
+      });
+      expect(toggleRes.ok).toBe(true);
+
+      const invRes = await fetch(`${hostSrv.url}/api/host/invites`, {
+        method: "POST",
+        headers: hostHeaders,
+      });
+      expect(invRes.ok).toBe(true);
+      const invite = await invRes.json();
+      expect(invite.code.startsWith("mshare1:")).toBe(true);
+
+      const hostStateRes = await fetch(`${hostSrv.url}/api/state`, { headers: hostHeaders });
+      const hostState = await hostStateRes.json();
+
+      const browser = await launchTestBrowser();
+      cleanups.push(() => browser.close());
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+      cleanups.push(() => ctx.close());
+
+      const recvPage = await ctx.newPage();
+      const errors = [];
+      const assets = new Map();
+      const parseRequests = [];
+      const applyRequests = [];
+      attachPageMonitors(recvPage, "handoff-recv", errors, assets);
+      recvPage.on("request", (req) => {
+        try {
+          const p = new URL(req.url()).pathname;
+          if (p === "/api/receiver/parse") parseRequests.push(req.url());
+          if (p === "/api/receiver/apply") applyRequests.push(req.url());
+        } catch {}
+      });
+
+      // 1. Initial page load with encoded #invite=mshare1%3A... hash
+      await recvPage.goto(`${recvSrv.url}/#invite=${encodeURIComponent(invite.code)}`, {
+        waitUntil: "domcontentloaded",
+      });
+      await recvPage.waitForSelector("#dlg-paste[open]");
+      await recvPage.waitForSelector("#paste-step-2:not([hidden])");
+
+      // Hash must be cleared immediately and tab switched to "received"
+      expect(await recvPage.evaluate(() => window.location.hash)).toBe("");
+      expect(await recvPage.isVisible("#panel-received")).toBe(true);
+      expect(await recvPage.textContent("#apply-host-fp")).toBe(hostState.identity.fingerprint);
+      expect(await recvPage.locator("#paste-step-2 .fact-item").count()).toBe(4);
+      expect(await recvPage.isVisible("#btn-send-apply")).toBe(true);
+      expect(parseRequests.length).toBe(1);
+
+      // SECURITY INVARIANT: NEVER auto-submit /api/receiver/apply
+      await recvPage.waitForTimeout(300);
+      expect(applyRequests).toEqual([]);
+      const recvStateAfterBoot = await (
+        await fetch(`${recvSrv.url}/api/state`, { headers: { "x-simple-share-token": recvSrv.token } })
+      ).json();
+      expect(recvStateAfterBoot.receivedPending || []).toEqual([]);
+
+      await recvPage.screenshot({ path: path.join(screenshotDir, "ui-hash-handoff-step2.png"), fullPage: false });
+
+      // 2. Dynamic hashchange with direct #mshare1:... format on an already-loaded page
+      await recvPage.click("#dlg-paste [data-close-dlg]");
+      await recvPage.click("#tab-owned");
+      expect(await recvPage.isVisible("#panel-owned")).toBe(true);
+
+      await recvPage.evaluate((code) => {
+        window.location.hash = `#${code}`;
+      }, invite.code);
+      await recvPage.waitForSelector("#dlg-paste[open]");
+      await recvPage.waitForSelector("#paste-step-2:not([hidden])");
+      expect(await recvPage.evaluate(() => window.location.hash)).toBe("");
+      expect(await recvPage.isVisible("#panel-received")).toBe(true);
+      expect(applyRequests).toEqual([]);
+
+      // 3. Invalid hash must be ignored and must not open dialog
+      await recvPage.click("#dlg-paste [data-close-dlg]");
+      await recvPage.evaluate(() => {
+        window.location.hash = "#invite=javascript:alert(1)";
+      });
+      await recvPage.waitForTimeout(200);
+      expect(await recvPage.evaluate(() => Boolean(document.querySelector("#dlg-paste")?.open))).toBe(false);
+
+      // 4. Manual paste of full share URL https://.../#mshare1:... into #paste-code-textarea
+      await recvPage.click("#btn-open-paste");
+      await recvPage.waitForSelector("#dlg-paste[open]");
+      await recvPage.fill("#paste-code-textarea", `https://share.example.cn/join/#${invite.code}`);
+      await recvPage.click("#btn-parse-invite");
+      await recvPage.waitForSelector("#paste-step-2:not([hidden])");
+      expect(await recvPage.textContent("#apply-host-fp")).toBe(hostState.identity.fingerprint);
+      expect(applyRequests).toEqual([]);
+
+      expect(errors).toEqual([]);
     },
     60_000,
   );

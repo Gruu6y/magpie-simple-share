@@ -459,6 +459,7 @@ describe("lib/store.mjs", () => {
       relayToken: "",
       directHost: "",
       directPort: 3497,
+      shareBaseUrl: "",
     });
     expect(initial.visibility).toEqual({ limit: true, quotas: false });
     expect(initial.invites).toEqual([]);

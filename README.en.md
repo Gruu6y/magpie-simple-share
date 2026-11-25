@@ -83,7 +83,7 @@ Sharing configured AI models from your magpie instance with remote family or fri
 
 Simple Share adds that exact layer:
 
-1. **Keyless single-use invite + 4-digit SAS verification.** Hosts generate a single-line `mshare1:...` code (5-minute TTL by default, single-use, auto-burns after 5 wrong secret attempts). After the receiver applies, both sides compare the 4-digit Short Authentication String (`HMAC-SHA256`) over chat before approval.
+1. **Keyless single-use invite + 4-digit SAS verification.** Hosts generate a single-line `mshare1:...` invite with selectable TTL (5 minutes default, 30 minutes recommended for first-time installers, or 2 hours), single-use, auto-burning after 5 wrong secret attempts — and can export a self-contained **offline `.html` invite card** (works via WeChat PC file click with zero server/VPN) or share a client-only **online invite link** (`#mshare1:...` fragment never sent to any server). After the receiver applies, both sides compare the 4-digit Short Authentication String (`HMAC-SHA256`) over chat before approval.
 2. **Fail-Closed host gateway guard.** Before every forwarded inference request, the host connector verifies the member's scoped key via `GET http://127.0.0.1:<port>/v1/magpie/limit` (~1 ms). Even if a host manually deletes a `gateway-key` in magpie, requests fail closed (`403`) instead of silently escalating on loopback. Admin, native, memory, keys, and MCP routes are strictly blocked.
 3. **Three transport modes with strict no-fallback.** Mode 1 (Iroh QUIC P2P + blind relay), Mode 2 (user-hosted blind forwarder over TLS 1.3 mTLS), Mode 3 (direct public IPv6/IPv4 over TLS 1.3 mTLS). Choosing Mode 2 or Mode 3 **never falls back silently** to third-party public relays.
 4. **Zero manual receiver configuration.** Once approved, the receiver starts an isolated `127.0.0.1` bridge and automatically registers a `remote-magpie` provider (`mshare-<host>-<shortId>`), immediately usable by any local Agent connected to magpie.
@@ -139,15 +139,27 @@ Mode 1 `@number0/iroh@1.2.0` native binary mapping (pinned `sha512` integrity ve
 ### Host (sharing your models)
 
 1. **Choose mode & enable sharing:** Open **Simple Share** → **我分享出去的**. If using default Mode 1 (P2P), prepare the on-demand `@number0/iroh` component under **连接与安全** (or switch straight to Mode 2 / 3 with zero downloads). Turn on the host toggle and accept the first-time privacy/ToS notice.
-2. **Generate an invite:** Click **＋ 生成分享邀请** to copy a one-line `mshare1:...` code (or expand the offline SVG QR code) and send it via your preferred chat app. Invites contain zero keys, expire in 5 minutes by default, are single-use, and burn after 5 wrong guesses.
+2. **Generate an invite (offline `.html` card, share link, or code):** Click **＋ 生成分享邀请**, pick a TTL (**5 minutes** default, **30 minutes** recommended when your friend still needs to install magpie, or **2 hours**), and share whichever format fits best:
+   - **Export offline invite card (`.html`):** Zero-CDN self-contained HTML file that opens directly from a WeChat PC file double-click with no server or VPN required — shows the host Ed25519 fingerprint, 4 transparency facts, domestic `npmmirror` install instructions, and a one-click local handoff button.
+   - **Online share link (`https://.../join/#mshare1:...`):** Automatically derived as `/join/#mshare1:...` for Mode 2 self-hosted relays, or powered by an optional custom `shareBaseUrl` configured under **连接与安全** (using the pre-rendered static page at [docs/join/index.html](docs/join/index.html)). The `#mshare1:...` fragment stays strictly client-side and is never transmitted to any server.
+   - **Raw `mshare1:...` code or offline SVG QR:** Ideal when the receiver already has Simple Share installed. Invites contain zero keys, are single-use, and burn after 5 wrong guesses.
 3. **Compare 4-digit SAS & approve quotas:** Once your friend applies, compare the 4-digit SAS code over chat, select allowed models (API vs personal subscription labels shown clearly), set period/token/cost/concurrency limits, and click **同意分享**.
 4. **Pause, edit, or revoke anytime:** Inspect 7-day / monthly / all-time per-model usage, toggle pause (`403 share_paused`, keeps quota), or revoke (immediately aborts live SSE streams and deletes the member's `magpie gateway-key`).
 
 ### Receiver (using shared models)
 
-1. **Paste invite:** Open **分享给我的** → **输入分享邀请…**, paste `mshare1:...`, verify the host name, mode, and Ed25519 fingerprint, enter your device name, and submit.
-2. **Confirm 4-digit SAS:** Tell the host the 4-digit code shown on screen. Once approved, Simple Share automatically launches a local loopback bridge and adds a `remote-magpie` provider (`mshare-<host>-<shortId>`) ready for all local Agents.
-3. **Test streaming:** Click **测试连接与流式输出** to measure live link mode, RTT, and real token streaming; leave anytime to remove the `remote-magpie` provider cleanly.
+1. **Zero-VPN bootstrap (if magpie / plugin is not installed yet):** Open the host's offline `.html` invite card or `/join/#mshare1:...` link for OS-specific one-line onboarding commands (using `https://registry.npmmirror.com`), or run the idempotent bootstrap scripts directly — invite secrets are never uploaded anywhere and Magpie downloads enforce mandatory SHA256 verification (supports `--mirror` / `MAGPIE_DOWNLOAD_MIRROR` with manual fallback):
+   ```powershell
+   # Windows (PowerShell)
+   pwsh -ExecutionPolicy Bypass -File scripts/bootstrap.ps1 -Invite "https://.../join/#mshare1:..."
+   ```
+   ```sh
+   # macOS / Linux (POSIX sh)
+   sh scripts/bootstrap.sh --invite "https://.../join/#mshare1:..."
+   ```
+2. **Local `#invite=` handoff or paste invite code/link:** Opening `http://127.0.0.1:3494/#invite=mshare1:...` immediately scrubs the hash via `history.replaceState`, switches to **分享给我的**, and opens Step 2 confirmation (host name, mode, Ed25519 fingerprint, 4 transparency facts, device name) — **never auto-submitting `/api/receiver/apply` without explicit confirmation (zero CSRF)**. You can also paste either a raw `mshare1:...` code or a full share URL directly into **分享给我的** → **输入分享邀请…**.
+3. **Confirm 4-digit SAS:** Tell the host the 4-digit code shown on screen. Once approved, Simple Share automatically launches a local loopback bridge and adds a `remote-magpie` provider (`mshare-<host>-<shortId>`) ready for all local Agents.
+4. **Test streaming:** Click **测试连接与流式输出** to measure live link mode, RTT, and real token streaming; leave anytime to remove the `remote-magpie` provider cleanly.
 
 <a id="tabs"></a>
 
@@ -155,9 +167,9 @@ Mode 1 `@number0/iroh@1.2.0` native binary mapping (pinned `sha512` integrity ve
 
 | Tab | Purpose |
 | --- | --- |
-| **我分享出去的** (Shared by me) | Host toggle & first-run notice, host name, gateway status, one-time invite & offline QR generator, pending requests with 4-digit SAS + model/quota/concurrency approval, member ledger with 7d/month/all breakdown, pause/resume/instant-abort revoke, and visibility toggles (`/v1/magpie/limit` vs `quotas`). |
-| **分享给我的** (Shared with me) | Invite parser with 4 transparency guarantees, large 4-digit SAS waiting card with withdraw button, active shared provider cards (host fingerprint, live link & latency, quota bar, allowed models), and one-click streaming connectivity test / leave. |
-| **连接与安全** (Connection & Security) | Switch between Modes 1, 2, and 3; on-demand `@number0/iroh` installer + custom relay URL; Mode 2 relay address/token & live reachability probe; Mode 3 direct host/port & reachability check; local Ed25519 fingerprint / EndpointId & 6 live security boundary checks. |
+| **我分享出去的** (Shared by me) | Host toggle & first-run notice, host name, gateway status, one-time invite generator (selectable 5m / 30m / 2h TTL, offline `.html` invite card export, online share link copy, offline SVG QR), pending requests with 4-digit SAS + model/quota/concurrency approval, member ledger with 7d/month/all breakdown, pause/resume/instant-abort revoke, and visibility toggles (`/v1/magpie/limit` vs `quotas`). |
+| **分享给我的** (Shared with me) | Invite parser accepting raw `mshare1:...` codes and full share URLs, `#invite=mshare1:...` local handoff (scrubs `location.hash` immediately and opens Step 2 confirmation without auto-applying), 4 transparency guarantees, large 4-digit SAS waiting card with withdraw button, active shared provider cards (host fingerprint, live link & latency, quota bar, allowed models), and one-click streaming connectivity test / leave. |
+| **连接与安全** (Connection & Security) | Switch between Modes 1, 2, and 3; on-demand `@number0/iroh` installer + custom relay URL; Mode 2 relay address/token & live reachability probe; Mode 3 direct host/port & reachability check; optional static invite page base URL (`shareBaseUrl`); local Ed25519 fingerprint / EndpointId & 6 live security boundary checks. |
 
 ![Shared With Me view in Simple Share: live P2P connection badge, daily quota bar, allowed models, and streaming test](assets/screenshot-received.png)
 
@@ -177,7 +189,7 @@ Switch anytime in **连接与安全**. Once Mode 2 or Mode 3 is selected, **sile
 
 ### Mode 2: deploying the zero-knowledge blind relay
 
-Source lives at [relay/simple-share-relay.mjs](relay/simple-share-relay.mjs) and [relay/Dockerfile](relay/Dockerfile), and CI publishes multi-arch (`linux/amd64` / `linux/arm64`) images to `ghcr.io/gruu6y/magpie-simple-share-relay:latest`. The relay forwards opaque ciphertext by anonymous `slotId` only — **zero inner TLS termination, zero keys stored, zero member state**:
+Source lives at [relay/simple-share-relay.mjs](relay/simple-share-relay.mjs) and [relay/Dockerfile](relay/Dockerfile), and CI publishes multi-arch (`linux/amd64` / `linux/arm64`) images to `ghcr.io/gruu6y/magpie-simple-share-relay:latest`. The relay forwards opaque ciphertext by anonymous `slotId` only — **zero inner TLS termination, zero keys stored, zero member state** — and also serves a built-in zero-CDN static landing page at `GET /join` (and `/join/`) with strict CSP and `Cache-Control: no-store` (parsing `#mshare1:...` purely client-side, including in standalone Docker builds):
 
 ```bash
 # Option A: run the multi-arch GHCR image
@@ -218,12 +230,17 @@ Simple Share ships a zero-dependency CLI ([bin/simple-share.mjs](bin/simple-shar
 | Category | Command | Description |
 | --- | --- | --- |
 | **Diagnostics** | `doctor [--json]` / `status [--json]` | Full diagnostics (identity, gateway, `iroh`, security checks) / sanitized state snapshot |
-| **Host invites** | `toggle <on\|off> [--tos]` / `invite` / `invite revoke <id>` | Toggle sharing (`--tos` required on first enable), create or revoke `mshare1:` invite |
+| **Host invites** | `toggle <on\|off> [--tos]` / `invite [--ttl <sec>] [--card [out.html]]` / `invite revoke <id>` | Toggle sharing (`--tos` required on first enable), create invite (`--ttl` `60..86400`s, default `300`), export offline `.html` card, or revoke |
 | **Approvals & members** | `pending` / `approve <id> [...]` / `reject <id>` / `members` / `pause <id>` / `resume <id>` / `revoke <id>` | Manage applications, scoped quotas/concurrency/models, pause/resume, or instant-abort revoke |
-| **Receiver** | `apply <mshare1:...> [--name <name>]` / `received` / `received test <id>` / `received leave <id>` | Apply with invite (prints 4-digit SAS), inspect shares, run E2E streaming probe, or leave |
-| **Transport** | `mode [p2p\|self-relay\|direct]` | View or configure active transport mode (`--iroh-relay`, `--relay`, `--relay-token`, `--host`, `--direct-port`) |
+| **Receiver** | `apply <code-or-url> [--name <name>]` / `join <inviteCodeOrUrl> [--name <name>]` / `received` / `received test <id>` / `received leave <id>` | Apply with raw code or full share URL; `join` parses, auto-installs Mode 1 Iroh if needed, applies, and prints the 4-digit SAS; inspect/test/leave shares |
+| **Transport** | `mode [p2p\|self-relay\|direct]` | View or configure active transport mode (`--iroh-relay`, `--relay`, `--relay-token`, `--share-base-url`, `--host`, `--direct-port`) |
 
-Run `bun bin/simple-share.mjs --help` for full flags and HTTP route details.
+Key HTTP control-plane & relay endpoints (all `/api/*` routes except `/api/health` require `x-simple-share-token` over loopback `127.0.0.1`):
+
+- **Invites & onboarding:** `POST /api/host/invites` (optional `{ ttlSec }`, returns `shareUrl` + `cardFilename`), `GET /api/host/invites/:id/card` (JSON `{ ok, id, filename, html }` or `?raw=1` downloadable HTML with `Cache-Control: no-store` + strict CSP), `DELETE /api/host/invites/:id`, `POST /api/host/share-base-url`, `POST /api/network/mode` (optional `network.shareBaseUrl`), `POST /api/receiver/parse` & `POST /api/receiver/apply` (both accept raw codes and full URLs).
+- **Mode 2 relay static landing page:** `GET /join` and `GET /join/` on `relay/simple-share-relay.mjs` (plus pre-rendered [docs/join/index.html](docs/join/index.html) for static hosting).
+
+Run `bun bin/simple-share.mjs --help` for full CLI flags.
 
 <a id="troubleshooting"></a>
 
@@ -232,7 +249,7 @@ Run `bun bin/simple-share.mjs --help` for full flags and HTTP route details.
 | Symptom | Fix |
 | --- | --- |
 | `tos_required` on first `toggle on` | Acknowledge the privacy & upstream-ToS prompt in the UI or pass `--tos` to `toggle on`. |
-| Invite rejected or expired | `mshare1:...` codes expire after **5 minutes**, are **single-use**, and auto-burn after **5 wrong attempts**; generate a fresh invite on the host. |
+| Invite rejected or expired | `mshare1:...` codes expire after **5 minutes** by default (choose **30 minutes** or **2 hours** in the invite dialog, or `--ttl 1800`, for first-time installers), are **single-use**, and auto-burn after **5 wrong attempts**; generate a fresh invite on the host. |
 | Intel Mac reports Mode 1 unsupported | `@number0/iroh@1.2.0` has no `darwin-x64` package; switch to Mode 2 (blind relay) or Mode 3 (direct TLS 1.3 mTLS). |
 | Mode 2 / 3 does not fall back to P2P | Intentional zero-trust rule: check VPS firewall/port forwarding, `RELAY_TOKEN`, and use the built-in connectivity test buttons. |
 | `403 share_paused` | Host paused the member (quotas preserved); ask the host to click resume. |
@@ -250,6 +267,7 @@ Run `bun bin/simple-share.mjs --help` for full flags and HTTP route details.
   - `SIMPLE_SHARE_PORT`: Overrides default control-plane port (`3494`).
   - `MAGPIE_BIN` / `SIMPLE_SHARE_MAGPIE_BIN` / `MAGPIE_CLI`: Explicit `magpie` binary path (boolean values such as `MAGPIE_CLI=1` are ignored automatically).
   - `MAGPIE_ADDR`: Overrides loopback gateway URL.
+  - `MAGPIE_DOWNLOAD_MIRROR`: Optional download mirror base URL for [scripts/bootstrap.ps1](scripts/bootstrap.ps1) / [scripts/bootstrap.sh](scripts/bootstrap.sh) (SHA256 verification remains mandatory).
   - `HOST` / `PORT` / `RELAY_TOKEN`: Configures [relay/simple-share-relay.mjs](relay/simple-share-relay.mjs) (`0.0.0.0`, `3499`, optional auth token).
 
 <a id="contributing"></a>
