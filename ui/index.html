@@ -288,6 +288,28 @@
           </div>
         </div>
 
+        <!-- Optional Custom Domestic Static Invite Base URL -->
+        <div class="section" id="section-share-base-url">
+          <div class="section-head">
+            <h2>在线邀请页地址 <span class="badge">可选 · 国内直连静态托管</span></h2>
+            <span class="section-sub">未配置时仍可随时导出离线 .html 邀请卡，无需任何服务器</span>
+          </div>
+          <div class="share-url-card">
+            <p class="mode-desc" style="margin-top:0;">
+              模式 2 自建中转会自动提供 <code class="mono">/join</code> 链接；若使用模式 1 或模式 3，可在此填写你托管静态引导页的国内直连地址，留空保存即可清空。未配置时仍可随时导出离线 <code class="mono">.html</code> 邀请卡直接微信发送。
+            </p>
+            <div class="field">
+              <label for="input-share-base-url">在线邀请页地址（可选 · 国内直连静态托管）</label>
+              <input class="input mono" id="input-share-base-url" type="text" placeholder="https://你的国内域名/join" />
+            </div>
+            <div class="mode-actions">
+              <button type="button" class="btn primary sm" id="btn-save-share-base-url">保存地址</button>
+              <button type="button" class="btn sm" id="btn-clear-share-base-url">清空</button>
+              <span id="share-base-url-result" style="font-size:12.5px; color:var(--muted);"></span>
+            </div>
+          </div>
+        </div>
+
         <!-- Local Cryptographic Identity & Hard Invariants -->
         <div class="section">
           <div class="section-head">
@@ -372,12 +394,59 @@
     </div>
     <div class="dlg-body">
       <p style="margin:0; color:var(--muted); font-size:13.5px;">
-        将下方邀请码发给对方（例如通过微信）。对方粘贴发起申请，你在「待处理申请」核对 <strong>4 位配对码</strong> 并同意后分享生效。
+        将下方离线邀请卡、在线链接或邀请码发给对方（例如通过微信）。对方导入发起申请后，你在「待处理申请」核对 <strong>4 位配对码</strong> 并同意即可生效。
       </p>
-      <div class="invite-pill-box">
-        <input type="text" id="invite-code-input" readonly />
-        <button type="button" class="btn primary sm" id="btn-copy-invite">复制邀请码</button>
+
+      <div class="invite-ttl-row">
+        <label class="invite-ttl-label" for="invite-ttl-select">邀请有效期</label>
+        <div class="invite-ttl-controls">
+          <select class="select invite-ttl-select" id="invite-ttl-select" aria-label="邀请有效期">
+            <option value="300" selected>5 分钟（默认）</option>
+            <option value="1800">30 分钟（推荐新亲友安装）</option>
+            <option value="7200">2 小时</option>
+          </select>
+          <button type="button" class="btn sm" id="btn-ttl-preset-1800" title="切换到 30 分钟有效期，方便未装软件的亲友从容完成安装">
+            切 30 分钟 · 适合新亲友
+          </button>
+        </div>
       </div>
+
+      <div class="invite-card-box">
+        <div class="invite-card-head">
+          <div style="flex:1; min-width:220px;">
+            <strong class="invite-card-title">离线邀请卡（.html）</strong>
+            <p class="invite-card-caption">直接微信发文件，国内无梯子电脑一点即开，自动引导安装 Magpie 与插件</p>
+          </div>
+          <button type="button" class="btn primary sm" id="btn-export-invite-card">导出离线邀请卡（.html）</button>
+        </div>
+        <div class="invite-card-fallback" id="invite-card-fallback" hidden>
+          <span id="invite-card-fallback-text">当前嵌入式沙箱受限，可复制离线邀请卡 HTML 手动保存为 .html 文件，或在独立浏览器打开本页面导出。</span>
+          <button type="button" class="btn sm" id="btn-copy-invite-card-html">复制邀请卡 HTML</button>
+        </div>
+      </div>
+
+      <div class="invite-share-section">
+        <div id="invite-link-row" hidden>
+          <div class="invite-sub-label">在线邀请链接（打开即引导安装或一键导入）</div>
+          <div class="invite-pill-box">
+            <input type="text" id="invite-link-input" readonly aria-label="在线邀请链接" />
+            <button type="button" class="btn sm" id="btn-copy-invite-link">复制链接</button>
+          </div>
+        </div>
+        <div class="invite-link-tip" id="invite-link-empty-tip" hidden>
+          <span>当前未配置在线邀请链接（离线 .html 邀请卡无需任何服务器即可直接使用）。如需可点击的国内直连链接，可</span>
+          <button type="button" class="link-btn" id="btn-jump-share-base-url">前往「连接与安全」配置静态邀请页地址 →</button>
+        </div>
+      </div>
+
+      <div class="invite-code-section">
+        <div class="invite-sub-label">一次性邀请码（对方已安装插件时可直接粘贴）</div>
+        <div class="invite-pill-box">
+          <input type="text" id="invite-code-input" readonly aria-label="一次性邀请码" />
+          <button type="button" class="btn sm" id="btn-copy-invite">复制邀请码</button>
+        </div>
+      </div>
+
       <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:12.5px; color:var(--muted);">
         <span>
           <strong style="color:var(--ink);">只能使用一次</strong> · <span id="invite-countdown">05:00 后过期</span> · 通道：<span id="invite-mode-tag"></span>
@@ -409,11 +478,11 @@
     </div>
     <div class="dlg-body" id="paste-step-1">
       <p style="margin:0; color:var(--muted); font-size:13.5px;">
-        把对方发给你的 <code class="mono">mshare1:</code> 邀请码粘贴到这里，看过透明说明后再决定是否发送申请。
+        把对方发给你的 <code class="mono">mshare1:...</code> 邀请码或完整分享链接（<code class="mono">https://.../#mshare1:...</code>）粘贴到这里，看过透明说明后再决定是否发送申请。
       </p>
       <div class="field">
-        <label for="paste-code-textarea">分享邀请码</label>
-        <textarea class="textarea mono" id="paste-code-textarea" rows="3" placeholder="在这里粘贴 mshare1:... 邀请码"></textarea>
+        <label for="paste-code-textarea">分享邀请码或完整分享链接</label>
+        <textarea class="textarea mono" id="paste-code-textarea" rows="3" placeholder="在这里粘贴 mshare1:... 邀请码，或完整的 https://.../#mshare1:... 分享链接"></textarea>
       </div>
       <p class="form-error" id="paste-error" hidden></p>
     </div>

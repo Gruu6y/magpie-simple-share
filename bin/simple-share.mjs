@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadOrCreateIdentity } from "../lib/crypto.mjs";
@@ -30,10 +31,12 @@ export function parseTokenFromHtml(html) {
 }
 
 const BOOLEAN_FLAGS = new Set(["help", "json", "tos"]);
+const OPTIONAL_VALUE_FLAGS = new Set(["card"]);
 const VALUE_FLAGS = new Set([
   "port",
   "url",
   "token",
+  "ttl",
   "models",
   "period",
   "tokens",
@@ -45,6 +48,7 @@ const VALUE_FLAGS = new Set([
   "relay",
   "relay-token",
   "iroh-relay",
+  "share-base-url",
   "host",
   "direct-port",
 ]);
@@ -72,11 +76,24 @@ export function parseCliArgs(argv) {
     if (eq >= 0) {
       const k = body.slice(0, eq);
       const v = body.slice(eq + 1);
+      if (!BOOLEAN_FLAGS.has(k) && !VALUE_FLAGS.has(k) && !OPTIONAL_VALUE_FLAGS.has(k)) {
+        throw new CliError(`Unknown option --${k}`, { code: "unknown_option" });
+      }
       options[k] = v;
       continue;
     }
     if (BOOLEAN_FLAGS.has(body)) {
       options[body] = true;
+      continue;
+    }
+    if (OPTIONAL_VALUE_FLAGS.has(body)) {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        options[body] = next;
+        i += 1;
+      } else {
+        options[body] = true;
+      }
       continue;
     }
     if (VALUE_FLAGS.has(body)) {
@@ -101,26 +118,28 @@ function helpText() {
     "  magpie-simple-share <command> [args] [options]",
     "",
     "命令:",
-    "  status                        查看插件状态（在线时查控制面，离线时读本地存储）",
-    "  toggle <on|off> [--tos]       开启或关闭对外分享",
-    "  invite [revoke <id>]          生成分享邀请码（或作废指定邀请）",
-    "  pending                       列出待审批申请及 4 位配对码",
-    "  approve <pendingId>           审批申请（--models a,b --period day --tokens 100 --cost 3 --concurrency 2 --note 备注）",
-    "  reject <pendingId>            拒绝申请并作废邀请",
-    "  members                       列出已分享成员及状态",
-    "  pause <memberId>              暂停成员（保留额度，返回 403 share_paused）",
-    "  resume <memberId>             恢复成员",
-    "  revoke <memberId>             撤销成员并立即断流、销毁 gateway-key",
-    "  apply <code> [--name <设备>]   输入 mshare1: 邀请码并提交申请",
-    "  received [test <id>|leave <id>] 查看/测试/退出已加入的分享",
-    "  mode [p2p|self-relay|direct]  查看或切换传输模式",
-    "  doctor                        本地环境、身份、Magpie 网关与安全自检",
+    "  status                              查看插件状态（在线时查控制面，离线时读本地存储）",
+    "  toggle <on|off> [--tos]             开启或关闭对外分享",
+    "  invite [--ttl <秒>] [--card [文件]] 生成邀请码/链接，或导出离线 .html 邀请卡",
+    "  invite revoke <id>                  作废指定邀请",
+    "  pending                             列出待审批申请及 4 位配对码",
+    "  approve <pendingId>                 审批申请（--models a,b --period day --tokens 100 --cost 3 --concurrency 2 --note 备注）",
+    "  reject <pendingId>                  拒绝申请并作废邀请",
+    "  members                             列出已分享成员及状态",
+    "  pause <memberId>                    暂停成员（保留额度，返回 403 share_paused）",
+    "  resume <memberId>                   恢复成员",
+    "  revoke <memberId>                   撤销成员并立即断流、销毁 gateway-key",
+    "  apply <code-or-url> [--name <设备>] 输入 mshare1: 邀请码或完整邀请链接并提交申请",
+    "  join <code-or-url> [--name <设备>]  一键加入（解析邀请，按需自动安装 P2P 模块，提交申请并打印 4 位配对码）",
+    "  received [test <id>|leave <id>]     查看/测试/退出已加入的分享",
+    "  mode [p2p|self-relay|direct]        查看或切换传输模式（支持 --share-base-url）",
+    "  doctor                              本地环境、身份、Magpie 网关与安全自检",
     "",
     "通用选项:",
-    "  --port <n>                    控制面端口（默认 3494 或 SIMPLE_SHARE_PORT）",
-    "  --url <http://127.0.0.1:...>  显式控制面地址（仅允许本机回环 HTTP）",
-    "  --json                        输出机器可读 JSON",
-    "  --help, -h                    显示帮助",
+    "  --port <n>                          控制面端口（默认 3494 或 SIMPLE_SHARE_PORT）",
+    "  --url <http://127.0.0.1:...>        显式控制面地址（仅允许本机回环 HTTP）",
+    "  --json                              输出机器可读 JSON",
+    "  --help, -h                          显示帮助",
   ].join("\n");
 }
 
@@ -202,7 +221,7 @@ function writeOut(data, asJson, humanText, stdout) {
  */
 export async function runCli(
   argv = [],
-  { env = process.env, fetchImpl = fetch, stdout = process.stdout, stderr = process.stderr } = {},
+  { env = process.env, fetchImpl = fetch, stdout = process.stdout, stderr = process.stderr, cwd = process.cwd() } = {},
 ) {
   const { positional, options } = parseCliArgs(argv);
   const asJson = Boolean(options.json);
@@ -410,11 +429,42 @@ export async function runCli(
       writeOut(res, asJson, `Revoked invite ${id}`, stdout);
       return 0;
     }
+    let body;
+    if (options.ttl !== undefined) {
+      const rawTtl = String(options.ttl).trim();
+      if (!/^\d+$/.test(rawTtl)) {
+        throw new CliError("Option --ttl must be an integer between 60 and 86400 seconds", {
+          code: "invalid_ttl",
+        });
+      }
+      body = { ttlSec: Number(rawTtl) };
+    }
     const res = await apiCall(baseUrl, cp.token, "/api/host/invites", {
       method: "POST",
+      ...(body ? { body } : {}),
       fetchImpl,
     });
-    writeOut(res, asJson, `${res.code}\n(id: ${res.id}, mode: ${res.mode}, ttl: ${res.ttlSec}s)`, stdout);
+    const outPayload = { ...res };
+    const lines = [res.code, `(id: ${res.id}, mode: ${res.mode}, ttl: ${res.ttlSec}s)`];
+    if (res.shareUrl) {
+      lines.push(`Share URL: ${res.shareUrl}`);
+    }
+    if (options.card !== undefined) {
+      const cardRes = await apiCall(baseUrl, cp.token, `/api/host/invites/${encodeURIComponent(res.id)}/card`, {
+        fetchImpl,
+      });
+      const requestedPath = typeof options.card === "string" ? options.card.trim() : "";
+      const defaultName =
+        basename(String(cardRes.filename || res.cardFilename || "simple-share-invite.html").replace(/[\r\n\0]/g, "")) ||
+        "simple-share-invite.html";
+      const outPath = requestedPath ? resolve(cwd, requestedPath) : resolve(cwd, defaultName);
+      await mkdir(dirname(outPath), { recursive: true });
+      await writeFile(outPath, String(cardRes.html ?? ""), "utf8");
+      outPayload.cardPath = outPath;
+      outPayload.cardFilename = cardRes.filename || res.cardFilename || defaultName;
+      lines.push(`Card: ${outPath}`);
+    }
+    writeOut(outPayload, asJson, lines.join("\n"), stdout);
     return 0;
   }
 
@@ -513,7 +563,7 @@ export async function runCli(
 
   if (cmd === "apply") {
     const code = positional[1];
-    if (!code) throw new CliError("Usage: apply <mshare1:...> [--name <device>]", { code: "invalid_args" });
+    if (!code) throw new CliError("Usage: apply <inviteCodeOrUrl> [--name <device>]", { code: "invalid_args" });
     const res = await apiCall(baseUrl, cp.token, "/api/receiver/apply", {
       method: "POST",
       body: { code, ...(options.name ? { deviceName: options.name } : {}) },
@@ -526,6 +576,75 @@ export async function runCli(
       sas ? `Applied (pendingId: ${res.pending.id}, SAS: ${sas})` : "Approved immediately",
       stdout,
     );
+    return 0;
+  }
+
+  if (cmd === "join") {
+    const input = positional[1];
+    if (!input) throw new CliError("Usage: join <inviteCodeOrUrl> [--name <device>]", { code: "invalid_args" });
+    const parsed = await apiCall(baseUrl, cp.token, "/api/receiver/parse", {
+      method: "POST",
+      body: { code: input },
+      fetchImpl,
+    });
+
+    let irohAutoInstalled = false;
+    let irohStatus = null;
+    if (parsed.m === "p2p") {
+      const state = await apiCall(baseUrl, cp.token, "/api/state", { fetchImpl });
+      irohStatus = state?.irohStatus || null;
+      if (irohStatus?.supported === false) {
+        throw new CliError(
+          `P2P (Mode 1) is unsupported on this platform (${irohStatus.unsupportedReason || "no native binary"}); ask the host for Mode 2 or Mode 3.`,
+          { code: "iroh_unsupported" },
+        );
+      }
+      if (!irohStatus?.installed || !irohStatus?.integrityOk) {
+        const installRes = await apiCall(baseUrl, cp.token, "/api/network/iroh/install", {
+          method: "POST",
+          fetchImpl,
+        });
+        irohStatus = installRes?.irohStatus || irohStatus;
+        if (!installRes?.ok) {
+          throw new CliError("Failed to install Iroh P2P module", { code: "iroh_install_failed" });
+        }
+        irohAutoInstalled = true;
+      }
+    }
+
+    const applied = await apiCall(baseUrl, cp.token, "/api/receiver/apply", {
+      method: "POST",
+      body: { code: input, ...(options.name ? { deviceName: options.name } : {}) },
+      fetchImpl,
+    });
+
+    const outPayload = {
+      ok: true,
+      invite: {
+        id: parsed.id,
+        hostName: parsed.h,
+        hostFp: parsed.fp,
+        mode: parsed.m,
+        expiresAt: parsed.expiresAt,
+      },
+      irohAutoInstalled,
+      ...(irohStatus ? { irohStatus } : {}),
+      ...applied,
+    };
+
+    const sas = applied?.pending?.sas;
+    const lines = [
+      `Host: ${parsed.h} (${parsed.fp})`,
+      `Mode: ${parsed.m}${irohAutoInstalled ? " (Iroh module auto-installed)" : ""}`,
+    ];
+    if (sas) {
+      lines.push(`SAS:  ${sas}`);
+      lines.push(`Pending ID: ${applied.pending.id}`);
+      lines.push("请向分享者核对以上 4 位配对码（SAS），对方批准后即可开始使用。");
+    } else {
+      lines.push("Status: Approved immediately");
+    }
+    writeOut(outPayload, asJson, lines.join("\n"), stdout);
     return 0;
   }
 
@@ -581,6 +700,7 @@ export async function runCli(
     if (options.relay !== undefined) network.relayAddr = options.relay;
     if (options["relay-token"] !== undefined) network.relayToken = options["relay-token"];
     if (options["iroh-relay"] !== undefined) network.irohRelayUrl = options["iroh-relay"];
+    if (options["share-base-url"] !== undefined) network.shareBaseUrl = options["share-base-url"];
     if (options.host !== undefined) network.directHost = options.host;
     if (options["direct-port"] !== undefined) network.directPort = Number(options["direct-port"]);
     const res = await apiCall(baseUrl, cp.token, "/api/network/mode", {
