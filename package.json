@@ -1,7 +1,7 @@
 {
   "name": "@gruu6y/page-simple-share",
   "version": "0.1.2",
-  "description": "简单分享：去中心化、零信任、开箱即用的跨网 Magpie 模型分享插件（支持 P2P / 自建盲中转 / 公网直连）",
+  "description": "简单分享:简单又安全的把你的模型用量分享给家人与朋友",
   "license": "MIT",
   "author": "Gruu6y",
   "publishConfig": {
