@@ -53,20 +53,48 @@ validate_http_url() {
 }
 
 extract_invite_code() {
-  raw="$1"
-  # Decode common URL-encoded colon %3A / %3a without invoking untrusted eval
-  decoded=$(printf '%s' "$raw" | sed 's/%3[Aa]/:/g')
-  found=$(printf '%s' "$decoded" | grep -Eo 'mshare1:[A-Za-z0-9_-]+' | head -n 1 || true)
-  case "$found" in
-    mshare1:*)
-      # Strict full-string character whitelist validation
-      rest=${found#mshare1:}
-      if [ -n "$rest" ] && printf '%s' "$rest" | grep -Eq '^[A-Za-z0-9_-]+$'; then
-        printf '%s' "$found"
-        return 0
-      fi
+  raw=$(printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [ -n "$raw" ] || return 1
+  # Reject embedded whitespace or newlines
+  if printf '%s' "$raw" | grep -Eq '[[:space:]]'; then
+    return 1
+  fi
+
+  candidate=""
+  case "$raw" in
+    http://*|https://*)
+      case "$raw" in
+        *"#"*) frag=${raw#*#} ;;
+        *) return 1 ;;
+      esac
+      case "$frag" in
+        invite=*)
+          val=${frag#invite=}
+          val=${val%%&*}
+          candidate=$(printf '%s' "$val" | sed 's/%3[Aa]/:/g')
+          ;;
+        *"&invite="*)
+          val=${frag#*&invite=}
+          val=${val%%&*}
+          candidate=$(printf '%s' "$val" | sed 's/%3[Aa]/:/g')
+          ;;
+        *)
+          candidate=$(printf '%s' "$frag" | sed 's/%3[Aa]/:/g')
+          ;;
+      esac
+      ;;
+    mshare1:*|mshare1%3A*|mshare1%3a*)
+      candidate=$(printf '%s' "$raw" | sed 's/%3[Aa]/:/g')
+      ;;
+    *)
+      return 1
       ;;
   esac
+
+  if printf '%s' "$candidate" | grep -Eq '^mshare1:[A-Za-z0-9_-]+$'; then
+    printf '%s' "$candidate"
+    return 0
+  fi
   return 1
 }
 
@@ -174,6 +202,15 @@ show_manual_magpie_guidance() {
 EOF
 }
 
+TMP_INSTALL_DIR=""
+cleanup_tmp_install() {
+  if [ -n "$TMP_INSTALL_DIR" ] && [ -d "$TMP_INSTALL_DIR" ]; then
+    rm -rf "$TMP_INSTALL_DIR"
+    TMP_INSTALL_DIR=""
+  fi
+}
+trap cleanup_tmp_install EXIT HUP INT TERM
+
 install_magpie_verified() {
   base_url=$(printf '%s' "$1" | sed 's#/*$##')
   override_sha="$2"
@@ -195,14 +232,13 @@ install_magpie_verified() {
   artifact_url="${base_url}/${asset}"
   sums_url="${base_url}/SHA256SUMS.txt"
 
-  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/magpie-bootstrap.XXXXXX")
-  cleanup_tmp() { rm -rf "$tmp_dir"; }
-  trap cleanup_tmp EXIT HUP INT TERM
+  TMP_INSTALL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/magpie-bootstrap.XXXXXX")
 
   expected=""
   if [ -n "$override_sha" ]; then
     expected=$(printf '%s' "$override_sha" | tr '[:upper:]' '[:lower:]')
     if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
+      cleanup_tmp_install
       show_manual_magpie_guidance "--sha256 必须为 64 位十六进制哈希值"
       return 1
     fi
@@ -210,6 +246,7 @@ install_magpie_verified() {
     log_step "正在获取 SHA256 校验清单: $sums_url"
     sums_body=$(http_get "$sums_url" 2>/dev/null || true)
     if [ -z "$sums_body" ]; then
+      cleanup_tmp_install
       show_manual_magpie_guidance "无法下载 SHA256 校验清单（拒绝跳过完整性校验）"
       return 1
     fi
@@ -220,36 +257,40 @@ install_magpie_verified() {
       }
     ')
     if [ -z "$expected" ]; then
+      cleanup_tmp_install
       show_manual_magpie_guidance "校验清单中未找到 ${asset} 的 SHA256 记录，拒绝跳过校验"
       return 1
     fi
   fi
 
-  tmp_bin="${tmp_dir}/${asset}"
+  tmp_bin="${TMP_INSTALL_DIR}/${asset}"
   log_step "正在下载 Magpie (${asset})..."
   if ! http_download "$artifact_url" "$tmp_bin"; then
+    cleanup_tmp_install
     show_manual_magpie_guidance "下载 ${artifact_url} 失败（可能受国内网络限制）"
     return 1
   fi
 
   actual=$(compute_sha256 "$tmp_bin" || true)
   if [ -z "$actual" ]; then
+    cleanup_tmp_install
     show_manual_magpie_guidance "系统缺少 sha256sum / shasum / openssl，无法完成 SHA256 校验"
     return 1
   fi
   if [ "$actual" != "$expected" ]; then
-    rm -f "$tmp_bin"
+    cleanup_tmp_install
     show_manual_magpie_guidance "SHA256 校验失败！期望 ${expected}，实际 ${actual}，已删除文件并中止"
     return 1
   fi
   log_step "SHA256 校验通过 (${actual})"
 
-  install_dir="$HOME/.local/bin"
+  install_dir="${MAGPIE_INSTALL_DIR:-$HOME/.local/bin}"
   mkdir -p "$install_dir"
   chmod 0755 "$tmp_bin"
   mv "$tmp_bin" "${install_dir}/magpie"
+  cleanup_tmp_install
   log_step "Magpie 已安装至: ${install_dir}/magpie"
-  printf '%s' "${install_dir}/magpie"
+  MAGPIE_FOUND="${install_dir}/magpie"
 }
 
 wait_for_health() {
@@ -408,7 +449,7 @@ fi
 
 if [ -z "$MAGPIE_FOUND" ]; then
   log_warn "本机尚未安装 Magpie，尝试按 SHA256 强校验下载安装..."
-  MAGPIE_FOUND=$(install_magpie_verified "$EFFECTIVE_MIRROR" "$EXPECTED_SHA256") || exit 1
+  install_magpie_verified "$EFFECTIVE_MIRROR" "$EXPECTED_SHA256" || exit 1
 else
   log_step "已找到 Magpie: $MAGPIE_FOUND"
 fi

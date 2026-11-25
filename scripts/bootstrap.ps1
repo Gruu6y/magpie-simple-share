@@ -81,17 +81,37 @@ function Test-SafeHttpUrl([string]$Raw) {
   }
 }
 
+function Get-JsonProp($Obj, [string]$PropName, $Default = $null) {
+  if ($null -eq $Obj -or $Obj -is [ValueType] -or $Obj -is [string]) { return $Default }
+  $prop = $Obj.PSObject.Properties[$PropName]
+  if ($null -eq $prop) { return $Default }
+  return $prop.Value
+}
+
 function Extract-InviteCode([string]$Raw) {
   if ([string]::IsNullOrWhiteSpace($Raw)) { return '' }
   $s = $Raw.Trim()
-  if ($s -match '%[0-9A-Fa-f]{2}') {
-    try { $s = [Uri]::UnescapeDataString($s) } catch { }
+  if ($s -match '\s') { return '' }
+
+  $candidate = ''
+  if ($s -match '^https?://') {
+    $hashIdx = $s.IndexOf('#')
+    if ($hashIdx -lt 0 -or $hashIdx -ge ($s.Length - 1)) { return '' }
+    $frag = $s.Substring($hashIdx + 1)
+    if ($frag -match '(?:^|&)invite=([^&]*)') {
+      $candidate = $Matches[1]
+    } else {
+      $candidate = $frag
+    }
+    $candidate = [regex]::Replace($candidate, '%3[Aa]', ':')
+  } elseif ($s -match '^mshare1(?::|%3[Aa])') {
+    $candidate = [regex]::Replace($s, '%3[Aa]', ':')
+  } else {
+    return ''
   }
-  $m = [regex]::Match($s, 'mshare1:[A-Za-z0-9_-]+')
-  if (-not $m.Success) { return '' }
-  $code = $m.Value
-  if ($code -notmatch '^mshare1:[A-Za-z0-9_-]+$') { return '' }
-  return $code
+
+  if ($candidate -notmatch '^mshare1:[A-Za-z0-9_-]+$') { return '' }
+  return $candidate
 }
 
 function Decode-InviteLocal([string]$Code) {
@@ -227,7 +247,7 @@ function Wait-ForHealth([string]$BaseUrl, [int]$MaxSec = 30) {
   for ($i = 0; $i -lt $MaxSec; $i++) {
     try {
       $res = Invoke-RestMethod -Uri "$BaseUrl/api/health" -Method Get -TimeoutSec 2
-      if ($res -and $res.ok -eq $true) { return $true }
+      if ((Get-JsonProp $res 'ok' $false) -eq $true) { return $true }
     } catch { }
     Start-Sleep -Seconds 1
   }
@@ -291,7 +311,7 @@ $HandoffUrl = if ($InviteCode) {
 } else {
   "$LocalBase/"
 }
-$InviteMode = if ($InviteMeta -and $InviteMeta.m) { [string]$InviteMeta.m } else { '' }
+$InviteMode = [string](Get-JsonProp $InviteMeta 'm' '')
 
 # Step 1: Detect Magpie
 Write-Step '步骤 1/4: 检测本机 Magpie...'
@@ -379,13 +399,16 @@ if ($InviteMode -eq 'p2p' -and $SessionToken) {
   try {
     $headers = @{ 'x-simple-share-token' = $SessionToken }
     $st = Invoke-RestMethod -Uri "$LocalBase/api/state" -Headers $headers -Method Get -TimeoutSec 5
-    $iroh = $st.irohStatus
-    if ($iroh -and $iroh.supported -eq $false) {
+    $iroh = Get-JsonProp $st 'irohStatus' $null
+    $irohSupported = Get-JsonProp $iroh 'supported' $null
+    $irohInstalled = Get-JsonProp $iroh 'installed' $false
+    $irohIntegrity = Get-JsonProp $iroh 'integrityOk' $false
+    if ($irohSupported -eq $false) {
       Write-WarnLine '当前设备架构不支持模式 1 (Iroh)，请改用模式 2 自建中转或模式 3 直连。'
-    } elseif (-not ($iroh -and $iroh.installed -eq $true -and $iroh.integrityOk -eq $true)) {
+    } elseif (-not ($irohInstalled -eq $true -and $irohIntegrity -eq $true)) {
       Write-Step '邀请为模式 1 (P2P)，正在通过国内镜像按需下载并校验 @number0/iroh (sha512)...'
       $installRes = Invoke-RestMethod -Uri "$LocalBase/api/network/iroh/install" -Headers $headers -Method Post -TimeoutSec 180
-      if ($installRes -and $installRes.ok -eq $true) {
+      if ((Get-JsonProp $installRes 'ok' $false) -eq $true) {
         Write-Step 'P2P 组件 (@number0/iroh) 安装与 sha512 校验完成。'
       } else {
         Write-WarnLine 'P2P 组件安装未返回成功状态，可在页面「连接与安全」手动重试。'
@@ -418,8 +441,11 @@ if ($Apply) {
       exit 1
     }
     $parsed = $out | ConvertFrom-Json
-    if ($parsed.pending -and $parsed.pending.sas) {
-      Show-SasBox -Sas ([string]$parsed.pending.sas) -PendingId ([string]$parsed.pending.id)
+    $pendingObj = Get-JsonProp $parsed 'pending' $null
+    $pendingSas = [string](Get-JsonProp $pendingObj 'sas' '')
+    $pendingId = [string](Get-JsonProp $pendingObj 'id' '')
+    if (-not [string]::IsNullOrEmpty($pendingSas)) {
+      Show-SasBox -Sas $pendingSas -PendingId $pendingId
     } else {
       Write-Step '申请已提交并生效。'
     }
@@ -441,8 +467,11 @@ if ($Apply) {
     -Body ($bodyObj | ConvertTo-Json -Compress) `
     -TimeoutSec 30
 
-  if ($applyRes.pending -and $applyRes.pending.sas) {
-    Show-SasBox -Sas ([string]$applyRes.pending.sas) -PendingId ([string]$applyRes.pending.id)
+  $applyPending = Get-JsonProp $applyRes 'pending' $null
+  $applySas = [string](Get-JsonProp $applyPending 'sas' '')
+  $applyPendingId = [string](Get-JsonProp $applyPending 'id' '')
+  if (-not [string]::IsNullOrEmpty($applySas)) {
+    Show-SasBox -Sas $applySas -PendingId $applyPendingId
   } else {
     Write-Step '申请已提交并生效。'
   }
