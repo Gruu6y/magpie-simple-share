@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -445,20 +446,113 @@ describe("Domestic bootstrap scripts (scripts/bootstrap.ps1 & scripts/bootstrap.
     ], { env: { ...process.env, SS_CMD: oneLiner } });
     expect(parseRes.code).toBe(0);
 
-    const badRes = await runProcess(psExe, [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      scriptPath,
-      "-Invite",
+    const badInputs = [
       "not-a-valid-code;calc",
-      "-DryRun",
-    ]);
-    expect(badRes.code).not.toBe(0);
+      "mshare1:abc;calc.exe",
+      "mshare1:abc$(whoami)",
+      "https://relay.example.com/join/#mshare1:abc;calc.exe",
+      "http://127.0.0.1:3494/#invite=mshare1%3Aabc;id",
+      "https://relay.example.com/join/",
+    ];
+    for (const bad of badInputs) {
+      const badRes = await runProcess(psExe, [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        scriptPath,
+        "-Invite",
+        bad,
+        "-DryRun",
+      ]);
+      expect(badRes.code).not.toBe(0);
+    }
+
+    // Regression: Set-StrictMode must NOT crash when invite JSON omits optional properties (e.g. {} or null)
+    for (const minimalCode of ["mshare1:e30", "mshare1:bnVsbA"]) {
+      const minRes = await runProcess(psExe, [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        scriptPath,
+        "-Invite",
+        minimalCode,
+        "-DryRun",
+      ]);
+      expect(minRes.code).toBe(0);
+    }
+
+    // Regression: live loopback apply when /api/state omits irohStatus and /api/receiver/apply returns immediate approval without pending
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "ss-ps-strict-"));
+    const fakeMagpie = path.join(tmpDir, "fake-magpie.cmd");
+    await fsp.writeFile(fakeMagpie, "@echo off\r\necho [{\"name\":\"@gruu6y/page-simple-share\"}]\r\n", "utf8");
+    const mockToken = "strict-test-token";
+    let applyCount = 0;
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/api/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.url === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<!doctype html><meta name="simple-share-token" content="${mockToken}">`);
+        return;
+      }
+      if (req.headers["x-simple-share-token"] !== mockToken) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      if (req.url === "/api/state") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({}));
+        return;
+      }
+      if (req.url === "/api/network/iroh/install" && req.method === "POST") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({}));
+        return;
+      }
+      if (req.url === "/api/receiver/apply" && req.method === "POST") {
+        applyCount += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise((r) => mockServer.listen(0, "127.0.0.1", r));
+    const mockPort = mockServer.address().port;
+    try {
+      const applyLive = await runProcess(
+        psExe,
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          scriptPath,
+          "-Invite",
+          `http://127.0.0.1:${mockPort}/#invite=${encodeURIComponent(code)}`,
+          "-Port",
+          String(mockPort),
+          "-Apply",
+        ],
+        { env: { ...process.env, MAGPIE_BIN: fakeMagpie } },
+      );
+      expect(applyLive.code).toBe(0);
+      expect(applyCount).toBe(1);
+      expect(applyLive.stdout).toContain("申请已提交并生效");
+    } finally {
+      await new Promise((r) => mockServer.close(r));
+      await fsp.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+    }
   });
 
-  test("scripts/bootstrap.sh passes POSIX syntax check and dry-run when sh is available", async () => {
+  test("scripts/bootstrap.sh passes POSIX syntax check, strict invite validation, and fresh loopback mirror install", async () => {
     const candidates = process.platform === "win32"
       ? ["C:\\Program Files\\Git\\bin\\sh.exe", "C:\\Program Files\\Git\\usr\\bin\\sh.exe"]
       : [Bun.which("sh")].filter(Boolean);
@@ -480,7 +574,154 @@ describe("Domestic bootstrap scripts (scripts/bootstrap.ps1 & scripts/bootstrap.
     const oneLinerSyntax = await runProcess(shExe, ["-n", "-c", unixOneLiner]);
     expect(oneLinerSyntax.code).toBe(0);
 
-    const badRes = await runProcess(shExe, [scriptPath, "--invite", "bad$(whoami)", "--dry-run"]);
-    expect(badRes.code).not.toBe(0);
+    // Regression: malformed raw & URL invites with trailing shell metacharacters MUST be rejected (never truncated)
+    const badInvites = [
+      "bad$(whoami)",
+      "mshare1:abc;whoami",
+      "mshare1:abc$(id)",
+      "https://relay.example.com/join/#mshare1:abc;whoami",
+      "http://127.0.0.1:3494/#invite=mshare1%3Aabc;id",
+      "https://relay.example.com/join/",
+    ];
+    for (const bad of badInvites) {
+      const badRes = await runProcess(shExe, [scriptPath, "--invite", bad, "--dry-run"]);
+      expect(badRes.code).not.toBe(0);
+    }
+
+    // Regression: fresh install via loopback mirror must NOT pollute MAGPIE_FOUND with log_step stdout lines
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "ss-sh-mirror-"));
+    const fakeHome = path.join(tmpDir, "home");
+    const installDir = path.join(tmpDir, "installed-bin");
+    const shimBinDir = path.join(tmpDir, "shim-bin");
+    const logFile = path.join(tmpDir, "magpie-invoked.log");
+    await fsp.mkdir(fakeHome, { recursive: true });
+    await fsp.mkdir(shimBinDir, { recursive: true });
+
+    // Create a portable POSIX uname shim returning Linux x86_64
+    const unameShim = path.join(shimBinDir, "uname");
+    await fsp.writeFile(
+      unameShim,
+      '#!/usr/bin/env sh\nif [ "$1" = "-m" ]; then echo "x86_64"; else echo "Linux"; fi\n',
+      { mode: 0o755 },
+    );
+
+    const logFilePosix = logFile.replace(/\\/g, "/");
+    const fakeMagpiePayload = Buffer.from(
+      `#!/usr/bin/env sh\nprintf '%s\\n' "$*" >> "${logFilePosix}"\necho '[{"name":"@gruu6y/page-simple-share"}]'\n`,
+      "utf8",
+    );
+    const expectedHash = crypto.createHash("sha256").update(fakeMagpiePayload).digest("hex");
+    const wrongHash = "0".repeat(64);
+    const mockToken = "sh-loopback-tok";
+
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/mirror/SHA256SUMS.txt") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(`${expectedHash}  magpie-linux-x64\n`);
+        return;
+      }
+      if (req.url === "/mirror/magpie-linux-x64" || req.url === "/bad-mirror/magpie-linux-x64") {
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(fakeMagpiePayload);
+        return;
+      }
+      if (req.url === "/bad-mirror/SHA256SUMS.txt") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(`${wrongHash}  magpie-linux-x64\n`);
+        return;
+      }
+      if (req.url === "/api/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (req.url === "/") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`<!doctype html><meta name="simple-share-token" content="${mockToken}">`);
+        return;
+      }
+      if (req.headers["x-simple-share-token"] !== mockToken) {
+        res.writeHead(401);
+        res.end();
+        return;
+      }
+      if (req.url === "/api/state") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ irohStatus: { supported: true, installed: true, integrityOk: true } }));
+        return;
+      }
+      if (req.url === "/api/receiver/apply" && req.method === "POST") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, pending: { id: "pend-sh-1", sas: "7391" } }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise((r) => mockServer.listen(0, "127.0.0.1", r));
+    const port = mockServer.address().port;
+
+    const basePosixPath = process.platform === "win32"
+      ? `${shimBinDir};C:\\Program Files\\Git\\usr\\bin;C:\\Program Files\\Git\\bin;C:\\Windows\\System32`
+      : `${shimBinDir}:/usr/bin:/bin`;
+    const cleanEnv = {
+      ...process.env,
+      HOME: fakeHome,
+      MAGPIE_INSTALL_DIR: installDir,
+      MAGPIE_BIN: "",
+      SIMPLE_SHARE_MAGPIE_BIN: "",
+      PATH: basePosixPath,
+    };
+
+    const runWithLinuxUname = (args) =>
+      process.platform === "win32"
+        ? runProcess(
+            shExe,
+            [
+              "-c",
+              'uname() { if [ "${1:-}" = "-m" ]; then echo x86_64; else echo Linux; fi; }; s="$1"; shift; . "$s"',
+              "_",
+              scriptPath,
+              ...args,
+            ],
+            { env: cleanEnv },
+          )
+        : runProcess(shExe, [scriptPath, ...args], { env: cleanEnv });
+
+    try {
+      // 1. Tampered SHA256 must fail with explicit mismatch and NOT install magpie
+      const badShaRes = await runWithLinuxUname([
+        "--mirror",
+        `http://127.0.0.1:${port}/bad-mirror`,
+        "--port",
+        String(port),
+        "--invite",
+        code,
+        "--apply",
+      ]);
+      expect(badShaRes.code).not.toBe(0);
+      expect(badShaRes.stderr).toContain("SHA256 校验失败");
+      expect(fs.existsSync(path.join(installDir, "magpie"))).toBe(false);
+
+      // 2. Valid SHA256 fresh install succeeds, executes downloaded magpie cleanly, and prints 4-digit SAS
+      const freshRes = await runWithLinuxUname([
+        "--mirror",
+        `http://127.0.0.1:${port}/mirror`,
+        "--port",
+        String(port),
+        "--invite",
+        code,
+        "--apply",
+      ]);
+      expect(freshRes.code).toBe(0);
+      expect(freshRes.stdout).toContain("SHA256 校验通过");
+      expect(freshRes.stdout).toContain("7 3 9 1");
+      expect(fs.existsSync(path.join(installDir, "magpie"))).toBe(true);
+      const invoked = await fsp.readFile(logFile, "utf8");
+      expect(invoked).toContain("plugin list --json");
+    } finally {
+      await new Promise((r) => mockServer.close(r));
+      await fsp.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+    }
   });
 });
