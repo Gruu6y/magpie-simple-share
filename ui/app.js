@@ -19,6 +19,14 @@ const MODE_META = {
 };
 
 const PERIOD_LABELS = { day: "每日", week: "每周", month: "每月" };
+const GITHUB_ISSUES_NEW_URL = "https://github.com/Gruu6y/magpie-simple-share/issues/new";
+const ISSUE_TYPES = {
+  bug: { label: "Bug / 故障反馈", prefix: "[Bug] ", ghLabel: "bug" },
+  network: { label: "连接 / 配对问题", prefix: "[连接问题] ", ghLabel: "bug" },
+  enhancement: { label: "功能建议", prefix: "[建议] ", ghLabel: "enhancement" },
+};
+const MAX_ISSUE_URL_LEN = 1900;
+const ISSUE_TRUNCATED_NOTE = "\n\n(内容较长已截断，请粘贴已复制的完整报告)";
 
 const DEFAULT_SECURITY_CHECKS = [
   { label: "双向公钥钉死（TLS 1.3 mTLS / QUIC）", ok: true, detail: "不信任任何第三方 CA；未批准的公钥在加密握手层直接被拒绝，0 字节触达应用层。" },
@@ -87,6 +95,7 @@ const uiState = {
   irohInstalling: false,
   inFlightMutations: 0,
   serviceError: "",
+  issueType: "bug",
 };
 
 let inviteTimer = null;
@@ -726,6 +735,8 @@ function syncInputIfNotDirty(id, value) {
 function renderAll() {
   renderBanner();
   const s = serverState;
+  const footerVer = $("#footer-version");
+  if (footerVer) footerVer.textContent = s?.version ? `v${s.version}` : "";
   if (!s) return;
 
   const mode = s.mode || "p2p";
@@ -1992,6 +2003,237 @@ function openConfirm(title, desc, btnLabel, onOk) {
   $("#dlg-confirm").showModal();
 }
 
+// ==================== Issue Reporting (Privacy-Safe) ====================
+
+function sanitizeDiagnosticError(raw) {
+  let msg = String(raw || "").trim();
+  if (!msg) return "";
+  msg = msg
+    .replace(/\bsk-magpie-key-[A-Za-z0-9_-]+\b/gi, "[REDACTED_KEY]")
+    .replace(/\bmshare1:[A-Za-z0-9_-]+\b/gi, "[REDACTED_INVITE]")
+    .replace(/\bed25519:[0-9a-fA-F·:-]+\b/gi, "[REDACTED_FP]")
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[REDACTED_URL]")
+    .replace(/wss?:\/\/[^\s"'<>]+/gi, "[REDACTED_URL]")
+    .replace(/\[[0-9a-fA-F:]+\](?::\d{1,5})?/g, "[REDACTED_IPV6]")
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b/g, "[REDACTED_IP]")
+    .replace(/\b[0-9a-fA-F]{16,}\b/g, "[REDACTED_HEX]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return msg.slice(0, 160);
+}
+
+function buildIssueDiagnostics() {
+  const s = serverState;
+  const env = s?.environment || {};
+  const osRuntime = env.platform
+    ? `${env.platform}/${env.arch || "unknown"}${env.bunVersion ? ` (Bun ${env.bunVersion})` : ""}`
+    : (navigator.platform || "unknown");
+  const viewCtx = window.origin === "null" ? "magpie-iframe-sandbox" : "standalone-browser";
+  const gw = s?.magpieGateway;
+  const gwText = gw
+    ? (gw.ok ? `connected${gw.version ? ` (v${gw.version})` : ""}` : "disconnected")
+    : "unknown";
+  const mode = s?.mode || "unknown";
+  const sharing = s ? (s.sharingEnabled ? "enabled" : "paused") : "unknown";
+  const listening = s?.transportStatus?.listening ? "yes" : "no";
+  const iroh = s?.irohStatus;
+  const irohText = !iroh
+    ? "unknown"
+    : iroh.supported === false
+      ? "unsupported"
+      : iroh.installed
+        ? `${iroh.integrityOk ? "ready" : "corrupted"}${iroh.version ? ` (v${iroh.version})` : ""}`
+        : "not-installed";
+
+  const members = Array.isArray(s?.members) ? s.members : [];
+  const pending = Array.isArray(s?.pending) ? s.pending : [];
+  const received = Array.isArray(s?.received) ? s.received : [];
+  const linkCounts = {};
+  for (const r of received) {
+    const st = String(r?.linkStatus || r?.status || "unknown");
+    linkCounts[st] = (linkCounts[st] || 0) + 1;
+  }
+  const linkSummary = Object.keys(linkCounts).length > 0
+    ? ` (${Object.entries(linkCounts).map(([k, v]) => `${k}:${v}`).join(", ")})`
+    : "";
+
+  const lines = [
+    `- Plugin: magpie-simple-share ${s?.version ? `v${s.version}` : "unknown"}`,
+    `- OS/Runtime: ${osRuntime}`,
+    `- View: ${viewCtx} | Tab: ${uiState.activeTab}`,
+    `- Magpie Gateway: ${gwText}`,
+    `- Sharing: ${sharing} | Mode: ${mode} | Listening: ${listening}`,
+    `- Iroh: ${irohText}`,
+    `- Counts: members=${members.length}, pending=${pending.length}, received=${received.length}${linkSummary}`,
+  ];
+
+  const transportErr = sanitizeDiagnosticError(s?.transportStatus?.error);
+  if (transportErr) lines.push(`- Transport Error: ${transportErr}`);
+  const svcErr = sanitizeDiagnosticError(uiState.serviceError);
+  if (svcErr) lines.push(`- Service Error: ${svcErr}`);
+
+  return lines.join("\n");
+}
+
+function buildIssueUrlClient({ title, body, labels }) {
+  const buildWithBody = (text) => {
+    const u = new URL(GITHUB_ISSUES_NEW_URL);
+    if (title) u.searchParams.set("title", title);
+    if (labels) u.searchParams.set("labels", labels);
+    if (text) u.searchParams.set("body", text);
+    return u.href;
+  };
+  let href = buildWithBody(body);
+  let truncated = false;
+  if (href.length > MAX_ISSUE_URL_LEN) {
+    truncated = true;
+    let lo = 0;
+    let hi = body.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (buildWithBody(body.slice(0, mid) + ISSUE_TRUNCATED_NOTE).length <= MAX_ISSUE_URL_LEN) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    const trimmed = body.slice(0, lo).trimEnd();
+    href = buildWithBody(trimmed ? `${trimmed}${ISSUE_TRUNCATED_NOTE}` : ISSUE_TRUNCATED_NOTE.trim());
+  }
+  return { url: href, truncated };
+}
+
+function buildIssuePayload() {
+  const typeMeta = ISSUE_TYPES[uiState.issueType] || ISSUE_TYPES.bug;
+  const rawTitle = ($("#issue-title")?.value || "").replace(/[\r\n\0]/g, " ").trim().slice(0, 120);
+  const title = rawTitle || typeMeta.prefix;
+  const desc = ($("#issue-desc")?.value || "").replace(/\0/g, "").trim().slice(0, 3000);
+  const includeDiag = $("#issue-include-diag")?.checked !== false;
+  const diag = includeDiag ? buildIssueDiagnostics() : "";
+
+  const sections = [
+    `## 问题类型\n${typeMeta.label}`,
+    `## 问题描述\n${desc || "（请在此补充现象、复现步骤或报错截图）"}`,
+  ];
+  if (diag) {
+    sections.push(`## 环境与运行状态（已脱敏）\n${diag}`);
+  }
+  const fullMarkdown = sections.join("\n\n");
+  const { url: issueUrl, truncated } = buildIssueUrlClient({
+    title,
+    body: fullMarkdown,
+    labels: typeMeta.ghLabel,
+  });
+
+  return {
+    title,
+    body: fullMarkdown,
+    labels: typeMeta.ghLabel,
+    fullMarkdown,
+    issueUrl,
+    truncated,
+  };
+}
+
+function setIssueType(nextType) {
+  if (!ISSUE_TYPES[nextType]) return;
+  uiState.issueType = nextType;
+  $$(".issue-type-pill").forEach((pill) => {
+    const active = pill.dataset.issueType === nextType;
+    pill.classList.toggle("is-active", active);
+    pill.setAttribute("aria-checked", active ? "true" : "false");
+  });
+}
+
+function openIssueDialog({ defaultType } = {}) {
+  if (defaultType && ISSUE_TYPES[defaultType]) {
+    setIssueType(defaultType);
+  } else {
+    setIssueType(uiState.issueType || "bug");
+  }
+  const fallback = $("#issue-fallback");
+  if (fallback) fallback.hidden = true;
+  const preview = $("#issue-diag-preview");
+  if (preview) preview.textContent = buildIssueDiagnostics();
+  const dlg = $("#dlg-issue");
+  if (dlg && !dlg.open) dlg.showModal();
+}
+
+function showIssueFallback(url, text) {
+  const fallback = $("#issue-fallback");
+  const fallbackText = $("#issue-fallback-text");
+  const urlInput = $("#issue-fallback-url");
+  if (fallbackText && text) fallbackText.textContent = text;
+  if (urlInput) urlInput.value = url || GITHUB_ISSUES_NEW_URL;
+  if (fallback) fallback.hidden = false;
+}
+
+async function submitIssueToGitHub() {
+  const btn = $("#btn-issue-open");
+  const payload = buildIssuePayload();
+  const fullCopyText = `# ${payload.title}\n\n${payload.fullMarkdown}`;
+  if (payload.truncated) {
+    await copyText(fullCopyText);
+  }
+
+  const inSandbox = window.origin === "null";
+  if (inSandbox) {
+    btn.disabled = true;
+    try {
+      const res = await api("/api/feedback/open", {
+        method: "POST",
+        body: {
+          title: payload.title,
+          body: payload.body,
+          labels: payload.labels,
+        },
+      });
+      if (res?.ok) {
+        toast(
+          res.truncated || payload.truncated
+            ? "已在浏览器打开 GitHub Issue 页面，完整报告已复制到剪贴板"
+            : "已在系统浏览器打开 GitHub Issue 提交页面",
+        );
+      } else {
+        showIssueFallback(
+          res?.url || payload.issueUrl,
+          "当前环境无法自动打开浏览器，请复制下方 GitHub 链接，或点击「复制反馈内容」。",
+        );
+        toast("未能直接唤起浏览器，已生成可复制链接");
+      }
+    } catch (err) {
+      showIssueFallback(
+        payload.issueUrl,
+        `唤起浏览器失败（${err.message}），请复制下方链接在浏览器打开。`,
+      );
+      toast("未能直接唤起浏览器，已生成可复制链接");
+    } finally {
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  let opened = null;
+  try {
+    opened = window.open(payload.issueUrl, "_blank", "noopener,noreferrer");
+  } catch {
+    opened = null;
+  }
+  if (opened) {
+    toast(
+      payload.truncated
+        ? "已打开 GitHub Issue 页面，完整报告已复制到剪贴板"
+        : "已打开 GitHub Issue 提交页面",
+    );
+  } else {
+    showIssueFallback(
+      payload.issueUrl,
+      "浏览器拦截了弹窗，请复制下方 GitHub 链接在新标签页打开，或点击「复制反馈内容」。",
+    );
+    toast("弹窗被拦截，请复制下方链接或反馈内容");
+  }
+}
+
 // ==================== Event Bindings ====================
 
 function bindEvents() {
@@ -2004,6 +2246,30 @@ function bindEvents() {
   });
 
   $("#btn-retry-state").addEventListener("click", () => refreshState());
+  $("#btn-open-issue")?.addEventListener("click", () => openIssueDialog());
+  $("#btn-footer-issue")?.addEventListener("click", () => openIssueDialog());
+  $("#btn-banner-issue")?.addEventListener("click", () => {
+    openIssueDialog({ defaultType: uiState.serviceError ? "bug" : "network" });
+  });
+  $$(".issue-type-pill").forEach((pill) => {
+    pill.addEventListener("click", () => setIssueType(pill.dataset.issueType));
+  });
+  $("#issue-include-diag")?.addEventListener("change", () => {
+    const preview = $("#issue-diag-preview");
+    if (preview) preview.textContent = buildIssueDiagnostics();
+  });
+  $("#btn-issue-copy")?.addEventListener("click", async () => {
+    const payload = buildIssuePayload();
+    const ok = await copyText(`# ${payload.title}\n\n${payload.fullMarkdown}`);
+    toast(ok ? "已复制完整反馈内容（已自动脱敏）" : "复制受限，请手动选择复制");
+  });
+  $("#btn-issue-copy-url")?.addEventListener("click", async () => {
+    const ok = await copyText($("#issue-fallback-url")?.value || "");
+    toast(ok ? "GitHub Issue 链接已复制到剪贴板" : "复制受限，请手动全选复制链接");
+  });
+  $("#btn-issue-open")?.addEventListener("click", () => {
+    void submitIssueToGitHub();
+  });
 
   $("#toggle-sharing").addEventListener("change", (e) => handleToggleSharing(e.target.checked));
   $("#btn-confirm-tos").addEventListener("click", confirmTosAndEnable);
