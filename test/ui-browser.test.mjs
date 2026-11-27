@@ -930,4 +930,162 @@ describe("Headless Chrome UI & sandbox iframe E2E", () => {
     },
     60_000,
   );
+
+  browserTest(
+    "provides effortless privacy-safe issue reporting in header, footer, standalone browser, and sandboxed iframe with fallback and 0 errors",
+    async () => {
+      const screenshotDir = resolveScreenshotDir();
+      const baseDir = makeTempDir("ss-issue-host-");
+      const iso = makeIsolatedEnv(baseDir, "127.0.0.1:59993");
+
+      const openedByServer = [];
+      let failServerOpen = false;
+      const srv = await startServer({
+        port: 0,
+        dataDir: iso.dataDir,
+        env: iso.env,
+        discoverGatewayFn: async () => ({
+          ok: true,
+          running: true,
+          url: "http://127.0.0.1:59993",
+          addr: "127.0.0.1:59993",
+          version: "0.1.4572",
+        }),
+        fetchModelsFn: async () => [],
+        openIssueUrlFn: async (url) => {
+          openedByServer.push(url);
+          if (failServerOpen) throw new Error("no desktop session");
+        },
+      });
+      cleanups.push(() => srv.close());
+
+      const secretRelayToken = "super-secret-relay-tok-999";
+      await fetch(`${srv.url}/api/host/name`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-simple-share-token": srv.token },
+        body: JSON.stringify({ hostName: "SECRET-MY-HOME-PC" }),
+      });
+      await fetch(`${srv.url}/api/network/mode`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-simple-share-token": srv.token },
+        body: JSON.stringify({
+          mode: "self-relay",
+          network: { relayAddr: "203.0.113.55:3499", relayToken: secretRelayToken },
+        }),
+      });
+      const stateJson = await (
+        await fetch(`${srv.url}/api/state`, { headers: { "x-simple-share-token": srv.token } })
+      ).json();
+
+      const wrapperServer = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch() {
+          const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="icon" href="data:,"></head><body style="margin:0;"><iframe id="issue-frame" sandbox="allow-scripts" src="${srv.url}/?theme=light" style="width:100vw;height:100vh;border:0;"></iframe></body></html>`;
+          return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+        },
+      });
+      cleanups.push(() => wrapperServer.stop(true));
+
+      const browser = await launchTestBrowser();
+      cleanups.push(() => browser.close());
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+      const sandboxCtx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+      cleanups.push(() => ctx.close());
+      cleanups.push(() => sandboxCtx.close());
+
+      const page = await ctx.newPage();
+      const sandboxPage = await sandboxCtx.newPage();
+      const errors = [];
+      const assets = new Map();
+      attachPageMonitors(page, "issue-standalone", errors, assets);
+      attachPageMonitors(sandboxPage, "issue-sandbox", errors, assets);
+
+      // 1. Standalone browser: header & footer entry points, redacted diagnostics, copy & window.open
+      await page.goto(srv.url, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => (document.querySelector("#footer-version")?.textContent || "").includes("v"));
+
+      await page.click("#btn-footer-issue");
+      await page.waitForSelector("#dlg-issue[open]");
+      await page.click("#dlg-issue [data-close-dlg]");
+      await page.waitForFunction(() => !document.querySelector("#dlg-issue")?.open);
+
+      await page.click("#btn-open-issue");
+      await page.waitForSelector("#dlg-issue[open]");
+
+      const diagText = await page.textContent("#issue-diag-preview");
+      expect(diagText).toContain("Plugin: magpie-simple-share v");
+      expect(diagText).toContain("View: standalone-browser");
+      expect(diagText).toContain("Mode: self-relay");
+      expect(diagText).toContain("Magpie Gateway: connected");
+      // Strictly redacts secrets & PII
+      expect(diagText).not.toContain("SECRET-MY-HOME-PC");
+      expect(diagText).not.toContain(stateJson.identity.fingerprint);
+      expect(diagText).not.toContain(secretRelayToken);
+      expect(diagText).not.toContain("203.0.113.55");
+      expect(diagText).not.toContain(srv.token);
+
+      await page.click('[data-issue-type="enhancement"]');
+      await page.fill("#issue-title", "希望支持导出配置备份");
+      await page.fill("#issue-desc", "换电脑时想快速迁移配置");
+      await page.click("#btn-issue-copy");
+      await page.waitForSelector(".toast");
+
+      await page.evaluate(() => {
+        window.__openedIssueUrls = [];
+        window.open = (url) => {
+          window.__openedIssueUrls.push(String(url));
+          return {};
+        };
+      });
+      await page.click("#btn-issue-open");
+      await page.waitForFunction(() => (window.__openedIssueUrls || []).length === 1);
+      const openedUrl = await page.evaluate(() => window.__openedIssueUrls[0]);
+      expect(openedUrl.startsWith("https://github.com/Gruu6y/magpie-simple-share/issues/new?")).toBe(true);
+      const parsedOpened = new URL(openedUrl);
+      expect(parsedOpened.searchParams.get("labels")).toBe("enhancement");
+      expect(parsedOpened.searchParams.get("title")).toBe("希望支持导出配置备份");
+      expect(parsedOpened.searchParams.get("body")).toContain("换电脑时想快速迁移配置");
+      expect(parsedOpened.searchParams.get("body")).toContain("standalone-browser");
+
+      await page.screenshot({ path: path.join(screenshotDir, "ui-issue-dialog.png"), fullPage: false });
+
+      // Popup-blocked fallback in standalone browser
+      await page.evaluate(() => {
+        window.open = () => null;
+      });
+      await page.click("#btn-issue-open");
+      await page.waitForSelector("#issue-fallback:not([hidden])");
+      expect(await page.inputValue("#issue-fallback-url")).toContain("https://github.com/Gruu6y/magpie-simple-share/issues/new");
+
+      // 2. Sandboxed iframe: delegates to POST /api/feedback/open and gracefully shows fallback on error
+      await sandboxPage.goto(`http://127.0.0.1:${wrapperServer.port}/`, { waitUntil: "domcontentloaded" });
+      const frame = await (await sandboxPage.waitForSelector("#issue-frame")).contentFrame();
+      expect(frame).not.toBeNull();
+      await frame.waitForFunction(() => (document.querySelector("#footer-version")?.textContent || "").includes("v"));
+
+      await frame.click("#btn-open-issue");
+      await frame.waitForSelector("#dlg-issue[open]");
+      const sandboxDiag = await frame.textContent("#issue-diag-preview");
+      expect(sandboxDiag).toContain("View: magpie-iframe-sandbox");
+      expect(sandboxDiag).not.toContain("SECRET-MY-HOME-PC");
+      expect(sandboxDiag).not.toContain(secretRelayToken);
+
+      await frame.fill("#issue-title", "沙箱内一键提交测试");
+      await frame.click("#btn-issue-open");
+      await frame.waitForFunction(() => document.querySelector(".toast")?.textContent?.includes("GitHub Issue"));
+      expect(openedByServer.length).toBe(1);
+      expect(new URL(openedByServer[0]).searchParams.get("title")).toBe("沙箱内一键提交测试");
+
+      // Simulate server unable to launch desktop browser -> shows copyable URL fallback with 0 HTTP errors
+      failServerOpen = true;
+      await frame.click("#btn-issue-open");
+      await frame.waitForSelector("#issue-fallback:not([hidden])");
+      expect(await frame.inputValue("#issue-fallback-url")).toContain("https://github.com/Gruu6y/magpie-simple-share/issues/new");
+      expect(openedByServer.length).toBe(2);
+
+      expect(errors).toEqual([]);
+    },
+    60_000,
+  );
 });

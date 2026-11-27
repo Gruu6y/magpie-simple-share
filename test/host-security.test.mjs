@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { parseTokenFromHtml, runCli } from "../bin/simple-share.mjs";
-import { startServer, TOKEN_HEADER } from "../lib/server.mjs";
+import {
+  buildGitHubIssueUrl,
+  GITHUB_ISSUES_NEW_URL,
+  startServer,
+  TOKEN_HEADER,
+} from "../lib/server.mjs";
 
 const cleanups = [];
 const tempDirs = [];
@@ -798,5 +803,117 @@ describe("Wave 2 control-plane, pairing, bridge & host-gateway security", () => 
     const appSource = readFileSync(join(import.meta.dir, "..", "ui", "app.js"), "utf8");
     expect(appSource).toContain('const reqPath = path.startsWith("/") ? path.slice(1) : path;');
     expect(appSource).toContain("await fetch(reqPath,");
+  });
+
+  test("buildGitHubIssueUrl and POST /api/feedback/open enforce GitHub origin, label allowlist, auth, and safe length cap", async () => {
+    const basic = buildGitHubIssueUrl({
+      title: "Line1\nLine2",
+      body: "Body\0text",
+      labels: ["bug", "arbitrary-label", "enhancement", "bug"],
+    });
+    expect(basic.truncated).toBe(false);
+    expect(basic.url.startsWith(`${GITHUB_ISSUES_NEW_URL}?`)).toBe(true);
+    const parsedBasic = new URL(basic.url);
+    expect(parsedBasic.searchParams.get("title")).toBe("Line1 Line2");
+    expect(parsedBasic.searchParams.get("labels")).toBe("bug,enhancement");
+    expect(parsedBasic.searchParams.get("body")).toBe("Bodytext");
+
+    const longBody = "排查日志：".repeat(600);
+    const capped = buildGitHubIssueUrl({
+      title: "长报告测试",
+      body: longBody,
+      labels: "bug",
+    });
+    expect(capped.truncated).toBe(true);
+    expect(capped.url.length).toBeLessThanOrEqual(1900);
+    expect(new URL(capped.url).searchParams.get("body")).toContain("内容较长已截断");
+
+    const dir = makeTempDir("ss-fb-");
+    const openedUrls = [];
+    let shouldFailOpen = false;
+    const srv = await startServer({
+      port: 0,
+      dataDir: dir,
+      env: { ...process.env, MAGPIE_ADDR: "127.0.0.1:59991" },
+      transportOptions: { directBindHost: "127.0.0.1" },
+      discoverGatewayFn: async () => ({ ok: false, running: false, url: "", addr: "", version: "" }),
+      fetchModelsFn: async () => [],
+      openIssueUrlFn: async (url) => {
+        openedUrls.push(url);
+        if (shouldFailOpen) throw new Error("headless display unavailable");
+      },
+    });
+    cleanups.push(() => srv.close());
+
+    // /api/state exposes safe runtime environment only
+    const stateRes = await fetch(`${srv.url}/api/state`, {
+      headers: { [TOKEN_HEADER]: srv.token },
+    });
+    expect(stateRes.status).toBe(200);
+    const stateJson = await stateRes.json();
+    expect(stateJson.environment).toEqual({
+      platform: process.platform,
+      arch: process.arch,
+      bunVersion: process.versions?.bun || "",
+    });
+
+    // Rejects missing/bad token, foreign origin, and non-POST method
+    expect((await fetch(`${srv.url}/api/feedback/open`, { method: "POST" })).status).toBe(401);
+    expect(
+      (
+        await fetch(`${srv.url}/api/feedback/open`, {
+          method: "POST",
+          headers: { [TOKEN_HEADER]: srv.token, origin: "https://evil.example.com" },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${srv.url}/api/feedback/open`, {
+          method: "GET",
+          headers: { [TOKEN_HEADER]: srv.token },
+        })
+      ).status,
+    ).toBe(405);
+
+    // Ignores client-supplied url and strictly builds GitHub Issues URL
+    const okRes = await fetch(`${srv.url}/api/feedback/open`, {
+      method: "POST",
+      headers: {
+        [TOKEN_HEADER]: srv.token,
+        origin: "null",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        url: "https://evil.example.com/phish",
+        title: "[Bug] 配对失败",
+        body: "详情描述",
+        labels: ["bug", "pwned"],
+      }),
+    });
+    expect(okRes.status).toBe(200);
+    const okBody = await okRes.json();
+    expect(okBody.ok).toBe(true);
+    expect(okBody.url.startsWith(`${GITHUB_ISSUES_NEW_URL}?`)).toBe(true);
+    expect(okBody.url).not.toContain("evil.example.com");
+    expect(new URL(okBody.url).searchParams.get("labels")).toBe("bug");
+    expect(openedUrls).toEqual([okBody.url]);
+
+    // When OS browser launch fails, still returns HTTP 200 with ok: false + copyable URL
+    shouldFailOpen = true;
+    const failRes = await fetch(`${srv.url}/api/feedback/open`, {
+      method: "POST",
+      headers: {
+        [TOKEN_HEADER]: srv.token,
+        origin: "null",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ title: "Test fail fallback", body: "desc", labels: "enhancement" }),
+    });
+    expect(failRes.status).toBe(200);
+    const failBody = await failRes.json();
+    expect(failBody.ok).toBe(false);
+    expect(failBody.url.startsWith(`${GITHUB_ISSUES_NEW_URL}?`)).toBe(true);
+    expect(failBody.message).toContain("headless display unavailable");
   });
 });

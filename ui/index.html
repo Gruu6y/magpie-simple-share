@@ -32,13 +32,24 @@
       </div>
       <div class="header-actions">
         <span class="badge" id="gateway-status-pill" hidden></span>
+        <button type="button" class="theme-pill" id="btn-open-issue" title="遇到问题或建议？一键附带脱敏诊断信息前往 GitHub 提交 Issue">
+          <svg class="pill-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="8" cy="8" r="6.25"></circle>
+            <line x1="8" y1="5" x2="8" y2="8.5"></line>
+            <circle cx="8" cy="11.2" r="0.6" fill="currentColor" stroke="none"></circle>
+          </svg>
+          反馈问题
+        </button>
         <button type="button" class="theme-pill" id="btn-theme" title="预览切换浅色/深色主题">◑ 浅色 / 深色</button>
       </div>
     </header>
 
     <div class="service-banner" id="service-banner" role="status" hidden>
       <span id="service-banner-text">正在连接本地简单分享服务…</span>
-      <button type="button" class="btn sm" id="btn-retry-state">重试连接</button>
+      <div class="service-banner-actions">
+        <button type="button" class="btn ghost sm" id="btn-banner-issue">反馈此问题</button>
+        <button type="button" class="btn sm" id="btn-retry-state">重试连接</button>
+      </div>
     </div>
 
     <nav class="tabs" role="tablist" aria-label="简单分享导航">
@@ -337,6 +348,15 @@
         </div>
       </section>
     </main>
+
+    <footer class="shell-footer">
+      <span class="footer-meta">
+        magpie-simple-share <span class="mono" id="footer-version"></span> · 零中心化服务器 · 双向公钥加密
+      </span>
+      <div class="footer-actions">
+        <button type="button" class="link-btn" id="btn-footer-issue">遇到问题或建议？一键反馈 Issue →</button>
+      </div>
+    </footer>
   </div>
 
   <!-- ==================== DIALOG 0: 首次开启分享 ToS 知情确认 ==================== -->
@@ -666,6 +686,60 @@
     <div class="dlg-foot">
       <button type="button" class="btn" data-close-dlg>取消</button>
       <button type="button" class="btn primary" id="btn-confirm-ok">确认</button>
+    </div>
+  </dialog>
+
+  <!-- ==================== DIALOG 6: 一键反馈 Issue ==================== -->
+  <dialog id="dlg-issue">
+    <div class="dlg-head">
+      <h3>反馈问题 / 提交 Issue</h3>
+      <button type="button" class="btn ghost sm" data-close-dlg>✕</button>
+    </div>
+    <div class="dlg-body">
+      <p style="margin:0; color:var(--muted); font-size:13px;">
+        一键携带已脱敏的环境摘要跳转 GitHub 提 Issue；如果当前环境无法打开浏览器，也可直接复制链接或完整报告。
+      </p>
+      <div class="field">
+        <label>反馈类型</label>
+        <div class="issue-type-group" role="radiogroup" aria-label="反馈类型">
+          <button type="button" class="issue-type-pill is-active" data-issue-type="bug" role="radio" aria-checked="true">Bug / 故障反馈</button>
+          <button type="button" class="issue-type-pill" data-issue-type="network" role="radio" aria-checked="false">连接 / 配对问题</button>
+          <button type="button" class="issue-type-pill" data-issue-type="enhancement" role="radio" aria-checked="false">功能建议</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="issue-title">标题（一句话概括，可选）</label>
+        <input class="input" id="issue-title" type="text" maxlength="120" placeholder="例如：模式 1 下接收端一直显示连接中…" />
+      </div>
+      <div class="field">
+        <label for="issue-desc">详细描述（可选）</label>
+        <textarea class="textarea" id="issue-desc" rows="4" maxlength="3000" placeholder="简单描述你做了什么操作、实际出现了什么现象或报错（留空也可在 GitHub 页面再补充）"></textarea>
+      </div>
+      <div class="issue-diag-box">
+        <label class="issue-diag-toggle">
+          <input type="checkbox" id="issue-include-diag" checked />
+          <span>自动附带已脱敏的环境与运行状态（推荐，帮助快速定位）</span>
+        </label>
+        <div class="issue-privacy-note">已自动脱敏：不包含任何密钥、公钥指纹、设备名、IP / 中转地址或对话内容。</div>
+        <details class="issue-diag-details">
+          <summary>查看将附带的诊断摘要</summary>
+          <pre class="issue-diag-preview mono" id="issue-diag-preview"></pre>
+        </details>
+      </div>
+      <div class="issue-fallback" id="issue-fallback" hidden>
+        <span id="issue-fallback-text">无法直接唤起浏览器，请复制下方链接在浏览器打开，或直接复制完整反馈内容。</span>
+        <div class="invite-pill-box">
+          <input type="text" id="issue-fallback-url" readonly aria-label="GitHub Issue 链接" />
+          <button type="button" class="btn sm" id="btn-issue-copy-url">复制链接</button>
+        </div>
+      </div>
+    </div>
+    <div class="dlg-foot" style="justify-content:space-between;">
+      <button type="button" class="btn sm" id="btn-issue-copy">复制反馈内容</button>
+      <div style="display:flex; gap:8px;">
+        <button type="button" class="btn sm" data-close-dlg>取消</button>
+        <button type="button" class="btn primary sm" id="btn-issue-open">前往 GitHub 提交 Issue →</button>
+      </div>
     </div>
   </dialog>
 

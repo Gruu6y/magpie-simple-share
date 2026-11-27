@@ -132,6 +132,7 @@ code, .mono { font-family: var(--mono); }
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .theme-pill:hover { border-color: var(--red); color: var(--red); }
+.pill-icon { width: 14px; height: 14px; flex: 0 0 auto; }
 
 /* Service / Gateway status banner */
 .service-banner {
@@ -143,6 +144,9 @@ code, .mono { font-family: var(--mono); }
   border-left: 3px solid var(--red);
   background: var(--red-soft);
   font-size: 13px;
+}
+.service-banner-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
 .service-banner.is-warn {
   border-color: rgba(138, 93, 22, 0.35);
@@ -730,6 +734,100 @@ dialog::backdrop { background: rgba(15, 13, 10, 0.55); backdrop-filter: blur(2px
   margin: 0;
   color: var(--red);
   font-size: 12.5px;
+}
+
+/* Footer */
+.shell-footer {
+  margin-top: 40px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.footer-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+/* Issue reporting dialog */
+#dlg-issue {
+  width: min(580px, calc(100vw - 32px));
+}
+.issue-type-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.issue-type-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.issue-type-pill:hover { border-color: var(--ink); }
+.issue-type-pill.is-active {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red);
+  font-weight: 600;
+}
+.issue-diag-box {
+  padding: 12px 14px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  display: grid;
+  gap: 8px;
+}
+.issue-diag-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+}
+.issue-diag-toggle input { accent-color: var(--red); }
+.issue-privacy-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+.issue-diag-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.issue-diag-preview {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.issue-fallback {
+  padding: 10px 12px;
+  background: var(--amber-soft);
+  border: 1px solid rgba(138, 93, 22, 0.28);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--ink-2);
+  display: grid;
+  gap: 8px;
 }
 
 /* Toast */
